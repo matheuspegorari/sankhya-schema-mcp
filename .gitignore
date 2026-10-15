@@ -7,6 +7,8 @@ __pycache__/
 # Credenciais — nunca subir
 .env
 *.env
+# Cadastro de clientes do modo DBE: guarda usuário e senha de cada um
+clients.json
 
 # Arquivos locais do Claude Code
 .claude/

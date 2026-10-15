@@ -10,6 +10,49 @@ A tool `check_updates` do próprio servidor compara a versão instalada com a
 de cada release no GitHub** são geradas a partir da seção correspondente deste
 arquivo. Uma seção vazia reprova a publicação.
 
+## [2.0.0] - 2026-10-14
+
+### Adicionado
+
+- **Modo DBE** (`SANKHYA_MODE=dbe`): o servidor deixa de abrir conexão com o
+  banco e passa a consultar pelo DB Explorer do Sankhya. Faz login com usuário e
+  senha da aplicação (`SANKHYA_DBE_URL`, `SANKHYA_DBE_USER`,
+  `SANKHYA_DBE_PASSWORD`) por `MobileLoginSP.login`, guarda o `jsessionid` na
+  vida do processo, refaz o login se a aplicação o recusar e manda toda tool
+  para `DbExplorerSP.executeQuery`. Serve a quem só alcança o Sankhya por HTTP.
+  `SANKHYA_MODE=direct` mantém a conexão com o banco pelo driver.
+- **Vários clientes**: `clients.json` cadastra clientes, cada um com o seu banco
+  (`oracle` ou `sqlserver`) e, no modo DBE, a sua sessão no Sankhya. Vale nos dois
+  modos: `SANKHYA_MODE` escolhe qual credencial de cada cliente é usada (`db_*` no
+  `direct`, `dbe_*` no `dbe`), e no modo direto cada cliente Oracle ganha o seu
+  pool. Toda tool de banco ganha o parâmetro `client`; `list_clients` mostra os
+  cadastrados sem credenciais. No máximo um cliente é `"default"` (dois derrubam a
+  subida); sem default e com mais de um cliente, a tool recusa em vez de escolher.
+  Com mais de um cliente, a resposta abre com `Cliente: acme · Oracle · DBE`.
+  `SANKHYA_CLIENTS_FILE` aponta para outro local. Chave desconhecida no arquivo é
+  erro, e o aviso de permissão aparece se outros usuários podem lê-lo. Sem o
+  arquivo, as variáveis `SANKHYA_*` valem como um cliente só.
+- Tool `get_triggers`: triggers de uma tabela, com momento, evento e estado. A
+  consulta é do dialeto — `ALL_TRIGGERS` no Oracle, `sys.triggers` no SQL
+  Server.
+
+### Alterado
+
+- **Quebra de compatibilidade:** `SANKHYA_MODE` é obrigatório e não tem mais
+  padrão. Antes, ausente valia `direct`; agora o servidor falha na subida e diz o
+  que falta. Quem já usa conexão direta precisa acrescentar `SANKHYA_MODE=direct`
+  ao `.env` (ou ao `.sankhya-mcp.env` do projeto). O motivo: um padrão tentaria
+  conectar no banco justamente onde só o DB Explorer é alcançável, e o erro viria
+  como "conexão recusada".
+- No modo DBE, `validate_query` executa a consulta (somente leitura) e descarta o
+  resultado, porque o DB Explorer não gera plano de execução; a resposta diz isso.
+  `list_modules` conta os prefixos no banco em vez de listar os nomes: o DB
+  Explorer corta em 5000 linhas e o catálogo passa disso.
+- Tool que precisa do resultado inteiro (colunas, índices, FKs, triggers) falha
+  com mensagem clara se o DB Explorer cortar o resultado, em vez de entregar parte
+  como se fosse tudo. `search_tables` e `search_columns` aceitam descrição
+  parcial e avisam.
+
 ## [1.4.1] - 2026-09-10
 
 ### Corrigido

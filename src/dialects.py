@@ -5,19 +5,26 @@ Concentra tudo que difere entre Oracle e SQL Server: as queries de catálogo, a
 abertura de conexão, o comando que abre a transação de leitura e o EXPLAIN.
 O `server.py` não sabe em qual banco está — pede a query pelo nome e conecta.
 
+O dialeto, o schema e o acesso (conexão direta ou DB Explorer, ver `dbe.py`) são
+do cliente ativo (`clients.py`): o mesmo processo atende clientes com bancos
+diferentes. O dialeto vale nos dois acessos: o DB Explorer executa o SQL do banco
+que está por trás.
+
 Não há classe abstrata aqui de propósito: são duas implementações concretas e
 fechadas. Um dict de queries por dialeto e uma função de conexão bastam.
 """
 
-import os
-import re
+import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
 
-from dotenv import load_dotenv
-
-load_dotenv()
+# O `.env` é carregado em `clients`, que monta os clientes no import.
+from clients import (  # noqa: F401  (re-exportados: são parte da API deste módulo)
+    active_client,
+    resolve_db_type,
+    resolve_mode,
+    resolve_schema,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +39,10 @@ _BIND = {
     "oracle":    lambda n: f":{n}",
     "sqlserver": lambda n: "%s",
 }
+
+# Tamanho do prefixo de módulo. A nomenclatura do Sankhya é `<PRX><MOD3><CTX>`:
+# TGFCAB, TGFITE e TGFPAR são o módulo TGF; AD_XXX são as tabelas customizadas.
+PREFIXO_MODULO = 3
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +253,27 @@ _ORACLE_QUERIES = {
           AND TABLE_NAME NOT LIKE 'BIN$%'
     """,
     "table_sample": "SELECT * FROM {schema}{tabela} WHERE ROWNUM <= {p1}",
+    # O mesmo agrupamento de `table_names`, feito no banco: o DB Explorer corta
+    # em 5000 linhas e o catálogo passa disso (9.203 tabelas numa base medida).
+    "table_prefixes": f"""
+        SELECT UPPER(SUBSTR(TABLE_NAME, 1, {PREFIXO_MODULO})) AS PREFIXO, COUNT(*) AS QTD
+        FROM ALL_TABLES
+        WHERE OWNER NOT IN {_ORACLE_SYSTEM_OWNERS}
+          AND TABLE_NAME NOT LIKE 'BIN$%'
+        GROUP BY UPPER(SUBSTR(TABLE_NAME, 1, {PREFIXO_MODULO}))
+    """,
+    "triggers": f"""
+        SELECT
+            TABLE_OWNER      AS OWNER,
+            TRIGGER_NAME,
+            TRIGGER_TYPE,
+            TRIGGERING_EVENT,
+            STATUS
+        FROM ALL_TRIGGERS
+        WHERE TABLE_NAME = {{p1}}
+          AND TABLE_OWNER NOT IN {_ORACLE_SYSTEM_OWNERS}
+        ORDER BY TABLE_OWNER, TRIGGER_NAME
+    """,
 }
 
 
@@ -369,6 +401,36 @@ _MSSQL_QUERIES = {
           AND TABLE_SCHEMA NOT IN {_MSSQL_SYSTEM_OWNERS}
     """,
     "table_sample": "SELECT TOP ({p1}) * FROM {schema}{tabela}",
+    "table_prefixes": f"""
+        SELECT UPPER(SUBSTRING(TABLE_NAME, 1, {PREFIXO_MODULO})) AS PREFIXO, COUNT(*) AS QTD
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_TYPE = 'BASE TABLE'
+          AND TABLE_SCHEMA NOT IN {_MSSQL_SYSTEM_OWNERS}
+        GROUP BY UPPER(SUBSTRING(TABLE_NAME, 1, {PREFIXO_MODULO}))
+    """,
+    # No Oracle o evento vem como `INSERT OR UPDATE` e o momento como `BEFORE
+    # EACH ROW`; aqui o evento é montado do mesmo jeito (STUFF tira o ` OR `
+    # inicial) e o momento é `AFTER` ou `INSTEAD OF`, os dois que o SQL Server
+    # tem. Não há BEFORE nem granularidade por linha.
+    "triggers": f"""
+        SELECT
+            s.name AS OWNER,
+            tr.name AS TRIGGER_NAME,
+            CASE WHEN tr.is_instead_of_trigger = 1 THEN 'INSTEAD OF' ELSE 'AFTER' END AS TRIGGER_TYPE,
+            STUFF(
+                CASE WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsInsertTrigger') = 1 THEN ' OR INSERT' ELSE '' END
+              + CASE WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsUpdateTrigger') = 1 THEN ' OR UPDATE' ELSE '' END
+              + CASE WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsDeleteTrigger') = 1 THEN ' OR DELETE' ELSE '' END,
+                1, 4, ''
+            ) AS TRIGGERING_EVENT,
+            CASE WHEN tr.is_disabled = 1 THEN 'DISABLED' ELSE 'ENABLED' END AS STATUS
+        FROM sys.triggers tr
+        JOIN sys.tables  t ON t.object_id = tr.parent_id
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+        WHERE t.name = {{p1}}
+          AND s.name NOT IN {_MSSQL_SYSTEM_OWNERS}
+        ORDER BY s.name, tr.name
+    """,
 }
 
 
@@ -381,64 +443,9 @@ QUERIES = {
 # ---------------------------------------------------------------------------
 # Seleção do dialeto
 # ---------------------------------------------------------------------------
-
-def resolve_db_type(value: Optional[str]) -> str:
-    """
-    Normaliza o valor de `SANKHYA_DB_TYPE`.
-
-    Ausente ou vazio cai em `oracle`: era o único banco suportado, e uma
-    instalação existente não pode passar a exigir configuração nova.
-    Valor desconhecido falha alto — conectar no banco errado é pior que não subir.
-    """
-    tipo = (value or "").strip().lower() or "oracle"
-    if tipo not in QUERIES:
-        raise ValueError(
-            f"SANKHYA_DB_TYPE inválido: {value!r}. Use 'oracle' ou 'sqlserver'."
-        )
-    return tipo
-
-
-DB_TYPE = resolve_db_type(os.getenv("SANKHYA_DB_TYPE"))
-
-DB_CONFIG = {
-    "host":         os.getenv("SANKHYA_DB_HOST",         "localhost"),
-    "port":         int(os.getenv("SANKHYA_DB_PORT",     "1433" if DB_TYPE == "sqlserver" else "1521")),
-    "sid":          os.getenv("SANKHYA_DB_SERVICE",      "XE"),
-    "service_name": os.getenv("SANKHYA_DB_SERVICE_NAME", None),
-    # SQL Server endereça database, não SID/service name.
-    "database":     os.getenv("SANKHYA_DB_DATABASE",     "jiva"),
-    "user":         os.getenv("SANKHYA_DB_USER",         "SANKHYA"),
-    # `developer` é a senha dos containers de desenvolvimento distribuídos pela
-    # Sankhya (skdev-oracle e skdev-mssql), que é o cenário padrão deste MCP.
-    "password":     os.getenv("SANKHYA_DB_PASSWORD",     "developer"),
-    # Schema onde as tabelas do Sankhya moram, quando não é o do usuário conectado.
-    "schema":       os.getenv("SANKHYA_DB_SCHEMA",       None),
-}
-
-_IDENTIFIER_RE = re.compile(r"^[A-Z][A-Z0-9_$#]*$")
-
-
-def resolve_schema(value: Optional[str]) -> Optional[str]:
-    """
-    Normaliza `SANKHYA_DB_SCHEMA`. Ausente ou vazio devolve None.
-
-    O nome é interpolado no texto das queries e do `ALTER SESSION` — nenhum dos
-    dois aceita bind para identificador —, então é validado aqui. Valor com
-    ponto, espaço ou pontuação falha alto em vez de virar SQL.
-    """
-    schema = (value or "").strip().upper()
-    if not schema:
-        return None
-    if not _IDENTIFIER_RE.match(schema):
-        raise ValueError(
-            f"SANKHYA_DB_SCHEMA inválido: {value!r}. Use apenas o nome do "
-            "schema, sem ponto nem espaço."
-        )
-    return schema
-
-
-DB_CONFIG["schema"] = resolve_schema(DB_CONFIG["schema"])
-
+# O dialeto, o schema e a conexão são do cliente ativo (`clients.active_client`):
+# o mesmo processo atende clientes com bancos diferentes, então nada disto é
+# global. Quem valida os valores é `clients.py`.
 
 def schema_prefix() -> str:
     """
@@ -450,22 +457,25 @@ def schema_prefix() -> str:
     usuário conectado; quando ele não é o dono das tabelas, o caso normal ao
     usar um login somente-leitura, a resposta é "objeto não existe".
     """
-    return f"{DB_CONFIG['schema']}." if DB_CONFIG["schema"] else ""
+    schema = active_client().schema
+    return f"{schema}." if schema else ""
 
 
 def query(name: str, **fmt) -> str:
     """
-    Devolve a query `name` do dialeto ativo com os placeholders já resolvidos.
+    Devolve a query `name` do dialeto do cliente ativo, com os placeholders já
+    resolvidos.
 
     `fmt` preenche os buracos dinâmicos que sobram no texto (`filtro`, `tabela`)
     e também passa pela resolução de placeholder — assim um filtro opcional pode
     escrever `{p2}` sem que o chamador saiba qual banco está ativo.
     O `%s` do pymssql passa intacto pelo `str.format`.
     """
-    bind = _BIND[DB_TYPE]
+    tipo = active_client().db_type
+    bind = _BIND[tipo]
     buracos = {"p1": bind(1), "p2": bind(2), "schema": schema_prefix()}
     fmt = {chave: valor.format(**buracos) for chave, valor in fmt.items()}
-    return QUERIES[DB_TYPE][name].format(**{**buracos, **fmt})
+    return QUERIES[tipo][name].format(**{**buracos, **fmt})
 
 
 # ---------------------------------------------------------------------------
@@ -473,12 +483,17 @@ def query(name: str, **fmt) -> str:
 # ---------------------------------------------------------------------------
 
 _INSTANTCLIENT_DIR = str(Path(__file__).parent.parent / "instantclient")
-_pool = None
+
+# Um pool por destino Oracle: com vários clientes, cada um tem o seu. O Instant
+# Client é por processo e só pode ser inicializado uma vez.
+_pools: dict[tuple, object] = {}
+_pools_lock = threading.Lock()
+_instantclient_pronto = False
 
 
-def _set_current_schema(conn, requested_tag):
+def _set_current_schema(conn, requested_tag, schema=None):
     """
-    Aponta a sessão Oracle para `SANKHYA_DB_SCHEMA`.
+    Aponta a sessão Oracle para o schema do cliente (`SANKHYA_DB_SCHEMA`).
 
     Redundante para as queries deste servidor, que já vão qualificadas por
     `schema_prefix()`. Serve ao `run_query`, cujo SQL é escrito por quem chama:
@@ -490,59 +505,75 @@ def _set_current_schema(conn, requested_tag):
     Segurança do README.
 
     Registrado como `session_callback` do pool: roda uma vez por conexão física
-    criada, não a cada query — o `ALTER SESSION` vale por toda a sessão.
+    criada, não a cada query — o `ALTER SESSION` vale por toda a sessão. O schema
+    vem fixado no pool; sem ele, vale o do cliente ativo.
     """
     with conn.cursor() as cur:
-        cur.execute(f"ALTER SESSION SET CURRENT_SCHEMA = {DB_CONFIG['schema']}")
+        cur.execute(
+            f"ALTER SESSION SET CURRENT_SCHEMA = {schema or active_client().schema}"
+        )
 
 
 def _oracle_pool():
     """
-    Pool Oracle, criado sob demanda. O Instant Client é inicializado junto: em
-    modo thick a carga da biblioteca é cara e travaria o handshake MCP se
-    acontecesse no import.
+    Pool Oracle do cliente ativo, criado sob demanda. O Instant Client é
+    inicializado junto: em modo thick a carga da biblioteca é cara e travaria o
+    handshake MCP se acontecesse no import.
     """
-    global _pool
-    if _pool is None:
-        import oracledb
+    global _instantclient_pronto
+    cliente = active_client()
+    # O modo de endereçamento entra na chave: SID e service name de mesmo texto são destinos distintos
+    destino = ("service", cliente.service_name) if cliente.service_name else ("sid", cliente.sid)
+    chave = (cliente.host, cliente.port, destino, cliente.user, cliente.schema)
+    with _pools_lock:
+        if chave not in _pools:
+            import oracledb
 
-        oracledb.init_oracle_client(lib_dir=_INSTANTCLIENT_DIR)
-        # service_name tem precedência sobre SID quando informado
-        if DB_CONFIG["service_name"]:
-            dsn = oracledb.makedsn(
-                DB_CONFIG["host"], DB_CONFIG["port"],
-                service_name=DB_CONFIG["service_name"],
+            if not _instantclient_pronto:
+                oracledb.init_oracle_client(lib_dir=_INSTANTCLIENT_DIR)
+                _instantclient_pronto = True
+            # service_name tem precedência sobre SID quando informado
+            if cliente.service_name:
+                dsn = oracledb.makedsn(
+                    cliente.host, cliente.port, service_name=cliente.service_name,
+                )
+            else:
+                dsn = oracledb.makedsn(cliente.host, cliente.port, sid=cliente.sid)
+            schema = cliente.schema
+            _pools[chave] = oracledb.create_pool(
+                user=cliente.user,
+                password=cliente.password,
+                dsn=dsn,
+                min=1,
+                max=5,
+                increment=1,
+                session_callback=(
+                    (lambda conn, tag: _set_current_schema(conn, tag, schema))
+                    if schema else None
+                ),
             )
-        else:
-            dsn = oracledb.makedsn(
-                DB_CONFIG["host"], DB_CONFIG["port"], sid=DB_CONFIG["sid"],
-            )
-        _pool = oracledb.create_pool(
-            user=DB_CONFIG["user"],
-            password=DB_CONFIG["password"],
-            dsn=dsn,
-            min=1,
-            max=5,
-            increment=1,
-            session_callback=_set_current_schema if DB_CONFIG["schema"] else None,
-        )
-    return _pool
+        return _pools[chave]
 
 
 @contextmanager
 def connect():
     """
-    Entrega uma conexão com o banco ativo.
+    Entrega uma conexão com o banco do cliente ativo.
 
     O driver é importado aqui dentro, não no topo do módulo: quem só usa Oracle
     não precisa ter o pymssql instalado, e quem só usa SQL Server não precisa do
     Instant Client.
 
-    Oracle vem de um pool (inicializar o Instant Client é caro). SQL Server abre
-    e fecha por chamada: o pymssql não traz pool e a carga deste servidor é a de
-    um cliente MCP só.
+    Oracle vem de um pool por cliente (inicializar o Instant Client é caro). SQL
+    Server abre e fecha por chamada: o pymssql não traz pool e a carga deste
+    servidor é a de um cliente MCP só.
     """
-    if DB_TYPE == "sqlserver":
+    cliente = active_client()
+    if cliente.mode != "direct":
+        raise RuntimeError(
+            f"O cliente `{cliente.name}` é DBE: não há conexão direta com o banco."
+        )
+    if cliente.db_type == "sqlserver":
         try:
             import pymssql
         except ModuleNotFoundError as exc:
@@ -554,11 +585,11 @@ def connect():
             ) from exc
 
         conn = pymssql.connect(
-            server=DB_CONFIG["host"],
-            port=str(DB_CONFIG["port"]),
-            user=DB_CONFIG["user"],
-            password=DB_CONFIG["password"],
-            database=DB_CONFIG["database"],
+            server=cliente.host,
+            port=str(cliente.port),
+            user=cliente.user,
+            password=cliente.password,
+            database=cliente.database,
         )
         try:
             yield conn
@@ -592,7 +623,7 @@ _MISSING_OBJECT = {
 
 def is_missing_object(exc: Exception) -> bool:
     """True se o erro for de tabela/view inexistente ou sem acesso."""
-    return any(marca in str(exc) for marca in _MISSING_OBJECT[DB_TYPE])
+    return any(marca in str(exc) for marca in _MISSING_OBJECT[active_client().db_type])
 
 
 # ---------------------------------------------------------------------------
@@ -622,7 +653,7 @@ def explain_plan(sql: str) -> list[dict]:
     with connect() as conn:
         cur = conn.cursor()
         try:
-            if DB_TYPE == "sqlserver":
+            if active_client().db_type == "sqlserver":
                 # SHOWPLAN_ALL precisa ser o único comando do batch — o pymssql
                 # manda um batch por execute(), então isso já está garantido.
                 cur.execute("SET SHOWPLAN_ALL ON")
@@ -680,16 +711,12 @@ def is_plan_unavailable(exc: Exception) -> bool:
     não por defeito da query — reprovar a query nesse caso seria veredito falso.
     Só existe no Oracle: o SHOWPLAN_ALL não depende de objeto nenhum.
     """
-    return DB_TYPE == "oracle" and (is_missing_object(exc) or "ORA-02404" in str(exc))
+    return active_client().db_type == "oracle" and (is_missing_object(exc) or "ORA-02404" in str(exc))
 
 
 # ---------------------------------------------------------------------------
 # Agrupamento de módulos
 # ---------------------------------------------------------------------------
-
-# Tamanho do prefixo de módulo. A nomenclatura do Sankhya é `<PRX><MOD3><CTX>`:
-# TGFCAB, TGFITE e TGFPAR são o módulo TGF; AD_XXX são as tabelas customizadas.
-PREFIXO_MODULO = 3
 
 
 def group_prefixes(table_names: list[str]) -> list[dict]:
@@ -715,6 +742,26 @@ def group_prefixes(table_names: list[str]) -> list[dict]:
         if len(nome) >= PREFIXO_MODULO and nome[0].isalpha():
             prefixo = nome[:PREFIXO_MODULO].upper()
             contagem[prefixo] = contagem.get(prefixo, 0) + 1
+    return _rank_prefixes(contagem)
+
+
+def group_prefix_counts(rows: list[dict]) -> list[dict]:
+    """
+    Mesmo resultado de `group_prefixes`, para quem recebe a contagem já pronta
+    do banco (`table_prefixes`): linhas `{prefixo, qtd}` em vez de nomes.
+
+    Aplica aqui as regras que o SQL não aplica: prefixo curto demais e prefixo
+    que não começa por letra ficam de fora, e caixas diferentes se somam.
+    """
+    contagem: dict[str, int] = {}
+    for r in rows or []:
+        prefixo = (r.get("prefixo") or "").upper()
+        if len(prefixo) == PREFIXO_MODULO and prefixo[0].isalpha():
+            contagem[prefixo] = contagem.get(prefixo, 0) + int(r.get("qtd") or 0)
+    return _rank_prefixes(contagem)
+
+
+def _rank_prefixes(contagem: dict[str, int]) -> list[dict]:
     return [
         {"prefixo": p, "qtd_tabelas": n}
         for p, n in sorted(contagem.items(), key=lambda kv: (-kv[1], kv[0]))

@@ -1,8 +1,10 @@
 # Sankhya Schema MCP
 
-[![release](https://img.shields.io/github/v/release/frshaka/sankhya-schema-mcp?label=release&color=blue)](https://github.com/frshaka/sankhya-schema-mcp/releases/latest)
+[![release](https://img.shields.io/github/v/release/matheuspegorari/sankhya-schema-mcp?label=release&color=blue)](https://github.com/matheuspegorari/sankhya-schema-mcp/releases/latest)
 
 Servidor MCP (Model Context Protocol) que conecta o Claude Code e/ou o Codex CLI ao banco do Sankhya ERP, permitindo explorar tabelas, campos, índices, relacionamentos e executar queries SQL diretamente durante uma conversa.
+
+Dois modos de acesso, escolhidos por `SANKHYA_MODE` (**obrigatório**): `direct` conecta no banco pelo driver; `dbe` consulta pelo DB Explorer do próprio Sankhya, para quando só a porta HTTP da aplicação é alcançável. Um mesmo servidor atende **vários clientes**, cada um com o seu banco, cadastrados em `clients.json`. Veja [Escolhendo o modo e o banco](#escolhendo-o-modo-e-o-banco), [Modo DBE](#modo-dbe-sem-conexão-com-o-banco) e [Vários clientes](#vários-clientes).
 
 Suporta os **dois bancos** distribuídos pela Sankhya no ambiente de desenvolvimento:
 
@@ -11,7 +13,7 @@ Suporta os **dois bancos** distribuídos pela Sankhya no ambiente de desenvolvim
 | Oracle (padrão) | `oracledb` em modo **thick** (Instant Client 21c, compatível com Oracle 11.2+) | `sankhyaimages/skdev-oracle:1.1.0` | 1521 | SID `XE` |
 | SQL Server | `pymssql` (wheel com FreeTDS embutido — não exige driver de sistema operacional) | `sankhyaimages/skdev-mssql:1.1.0` | 1433 | database `jiva` |
 
-A escolha é feita por `SANKHYA_DB_TYPE` no `.env` — veja [Configuração do banco](#configuração-do-banco).
+O banco é escolhido por `SANKHYA_DB_TYPE` (no `.env` ou, por cliente, no `clients.json`) — veja [Configuração do banco](#configuração-do-banco).
 
 ---
 
@@ -26,7 +28,9 @@ A escolha é feita por `SANKHYA_DB_TYPE` no `.env` — veja [Configuração do b
 | `get_foreign_keys` | FKs do banco **e** as ligações lógicas do dicionário (as que o JAPE enxerga) |
 | `get_indexes` | Mostra índices e suas colunas |
 | `run_query` | Executa SELECT e retorna resultado formatado (somente leitura) |
-| `validate_query` | Valida sintaxe SQL sem executar (EXPLAIN PLAN no Oracle, SHOWPLAN_ALL no SQL Server) |
+| `list_clients` | Clientes cadastrados no `clients.json`, sem credenciais |
+| `get_triggers` | Triggers de uma tabela: momento, evento e se estão ativas (no vocabulário de cada banco) |
+| `validate_query` | Valida sintaxe SQL sem executar (EXPLAIN PLAN no Oracle, SHOWPLAN_ALL no SQL Server). No modo DBE não há plano: a query é executada (somente leitura) e o resultado descartado |
 | `table_sample` | Amostra de dados reais, **com o rótulo ao lado do código** (`L (Liberada)`) |
 | `list_modules` | Visão geral dos módulos Sankhya por prefixo de tabela |
 | `check_updates` | Diz se há versão mais nova publicada e o que mudou |
@@ -115,7 +119,7 @@ sudo apt-get install -y curl unzip libaio1
 ### Windows
 
 ```powershell
-git clone https://github.com/frshaka/sankhya-schema-mcp.git
+git clone https://github.com/matheuspegorari/sankhya-schema-mcp.git
 cd sankhya-schema-mcp
 pwsh -File setup.ps1
 ```
@@ -123,7 +127,7 @@ pwsh -File setup.ps1
 ### Linux
 
 ```bash
-git clone https://github.com/frshaka/sankhya-schema-mcp.git
+git clone https://github.com/matheuspegorari/sankhya-schema-mcp.git
 cd sankhya-schema-mcp
 bash setup.sh
 ```
@@ -147,7 +151,7 @@ pwsh -File setup.ps1 -Cli both     # claude | codex | both
 bash setup.sh --cli both           # claude | codex | both
 ```
 
-Após o setup, configure as credenciais do banco no arquivo `.env` e reinicie o CLI escolhido.
+Após o setup, configure o `.env` (**`SANKHYA_MODE` é obrigatório**: `direct` ou `dbe`) e, se for atender vários clientes, o `clients.json`. Reinicie o CLI escolhido. Sem `SANKHYA_MODE` o MCP não sobe e diz o que falta.
 
 Veja **[INSTALACAO.md](INSTALACAO.md)** para o guia completo passo a passo, configuração de credenciais e solução de problemas.
 
@@ -161,20 +165,22 @@ Copie o arquivo de exemplo e edite com suas credenciais:
 cp .env.example .env
 ```
 
-### Escolhendo o banco
+### Escolhendo o modo e o banco
 
-Duas chaves definem o destino:
+Três chaves definem o destino:
 
 | Chave | Valores | Default | Para que serve |
 |-------|---------|---------|----------------|
-| `SANKHYA_DB_TYPE` | `oracle` \| `sqlserver` | `oracle` | Escolhe o dialeto, o driver e as queries de catálogo |
+| `SANKHYA_MODE` | `direct` \| `dbe` | **nenhum, obrigatório** | Como o MCP chega ao banco: `direct` conecta pelo driver; `dbe` consulta pelo DB Explorer do Sankhya (veja [Modo DBE](#modo-dbe-sem-conexão-com-o-banco)) |
+| `SANKHYA_DB_TYPE` | `oracle` \| `sqlserver` | `oracle` | Escolhe o dialeto, o driver e as queries de catálogo. Vale nos dois modos |
 | `SANKHYA_DB_DATABASE` | nome do database | `jiva` | Só no SQL Server, que endereça database em vez de SID/service name |
 
-O default é `oracle` de propósito: uma instalação existente continua funcionando sem tocar no `.env`.
-Valor desconhecido em `SANKHYA_DB_TYPE` faz o servidor falhar na subida, em vez de conectar no banco errado.
+`SANKHYA_MODE` não tem padrão: sem ele o servidor falha na subida e diz o que falta. Um padrão tentaria conectar no banco justamente onde só o DB Explorer é alcançável, e o erro viria como "conexão recusada". **Instalações antigas precisam acrescentar `SANKHYA_MODE=direct` ao `.env`.**
+O default de `SANKHYA_DB_TYPE` é `oracle`. Valor desconhecido em qualquer das duas chaves faz o servidor falhar na subida, em vez de conectar no banco errado.
 
 **Oracle** (`.env`):
 ```ini
+SANKHYA_MODE=direct
 SANKHYA_DB_TYPE=oracle
 SANKHYA_DB_HOST=localhost
 SANKHYA_DB_PORT=1521
@@ -187,6 +193,7 @@ SANKHYA_DB_PASSWORD=developer
 
 **SQL Server** (`.env`):
 ```ini
+SANKHYA_MODE=direct
 SANKHYA_DB_TYPE=sqlserver
 SANKHYA_DB_HOST=localhost
 SANKHYA_DB_PORT=1433
@@ -196,6 +203,84 @@ SANKHYA_DB_PASSWORD=developer
 ```
 
 > O arquivo `.env` está no `.gitignore` e nunca será versionado.
+
+### Modo DBE: sem conexão com o banco
+
+Quando só a porta HTTP do Sankhya é alcançável (a do Oracle ou do SQL Server está fechada), o MCP pode trabalhar pelo **DB Explorer** da própria aplicação. No modo `dbe` ele não abre conexão com o banco: faz login com usuário e senha do Sankhya (`MobileLoginSP.login`), guarda o `jsessionid` durante a vida do processo e manda **toda** consulta para `DbExplorerSP.executeQuery`.
+
+| Chave | Obrigatória no modo `dbe` | Para que serve |
+|-------|---------------------------|----------------|
+| `SANKHYA_MODE` | sim (`dbe`) | Liga o modo. Obrigatória em qualquer modo, sem padrão |
+| `SANKHYA_DBE_URL` | sim | Endereço do Sankhya (`http://host:8380`). `/mge` no fim é aceito e ignorado |
+| `SANKHYA_DBE_USER` | sim | Usuário do Sankhya (não é o usuário do banco) |
+| `SANKHYA_DBE_PASSWORD` | sim | Senha do usuário |
+| `SANKHYA_DB_TYPE` | não, mas confira | O banco por trás. O SQL é escrito para ele: `oracle` (padrão) ou `sqlserver` |
+
+```ini
+SANKHYA_MODE=dbe
+SANKHYA_DBE_URL=http://sankhya.exemplo.com.br:8380
+SANKHYA_DBE_USER=usuario_sankhya
+SANKHYA_DBE_PASSWORD=senha_sankhya
+SANKHYA_DB_TYPE=oracle
+```
+
+Falta de qualquer variável derruba o servidor na subida, com a lista do que falta. A sessão é aberta na primeira consulta e refeita sozinha se a aplicação a recusar (expirou, reiniciou); ao encerrar o servidor ele tenta fazer o logout.
+
+O DB Explorer **não é um terminal SQL**, e isso muda o comportamento de algumas tools:
+
+- Só aceita `SELECT` e `WITH`. A escrita é recusada pela própria aplicação, além da allowlist deste servidor.
+- Não tem bind: os parâmetros são escritos no texto como literal, com escape de aspas.
+- Devolve no máximo **5000 linhas** por consulta. As tools que precisam do resultado inteiro (colunas, índices, FKs, triggers) falham com mensagem clara em vez de entregar parte como se fosse tudo; `search_tables` e `search_columns` avisam que as descrições ficaram incompletas; `list_modules` conta no banco em vez de listar nomes (o catálogo passa de 5000 tabelas).
+- Não há `EXPLAIN PLAN`. `validate_query` **executa** a consulta (somente leitura) e descarta o resultado, e diz isso na resposta.
+- Datas chegam como texto e são convertidas de volta para data.
+
+O SQL continua adaptado ao banco: o catálogo (`ALL_TABLES` no Oracle, `INFORMATION_SCHEMA`/`sys.*` no SQL Server) e as triggers (`ALL_TRIGGERS` × `sys.triggers`) usam a query de cada dialeto.
+
+> O usuário do Sankhya enxerga o que o perfil dele permite no DB Explorer. Use um usuário com acesso somente a esse recurso, e trate o `.env` como credencial de aplicação.
+
+### Vários clientes
+
+Um mesmo MCP pode atender vários clientes, cada um com o seu banco. O cadastro é o arquivo **`clients.json`** na raiz do projeto e vale **nos dois modos**. Use `clients.example.json` como modelo:
+
+```json
+{
+  "acme": {"descricao": "Acme Ltda", "default": true, "db_type": "oracle",
+           "db_host": "10.0.0.5", "db_service": "XE",
+           "db_user": "usuario_banco", "db_password": "senha_banco",
+           "dbe_url": "http://sankhya.acme.com.br:8380",
+           "dbe_user": "usuario_sankhya", "dbe_password": "senha_sankhya"},
+  "beta": {"descricao": "Beta SA", "db_type": "sqlserver", "db_schema": "SANKHYA",
+           "db_host": "10.0.0.9", "db_database": "jiva",
+           "db_user": "usuario_banco", "db_password": "senha_banco",
+           "dbe_url": "https://sankhya.beta.com.br",
+           "dbe_user": "usuario_sankhya", "dbe_password": "senha_sankhya"}
+}
+```
+
+**O modo escolhe a credencial.** `SANKHYA_MODE` vale para o processo inteiro e decide qual conjunto de cada cliente é usado: `db_*` no `direct`, `dbe_*` no `dbe`. Só o conjunto do modo em uso é exigido; o outro pode ficar de fora (ou guardado, para quando você trocar o modo). Cliente sem as credenciais do modo derruba a subida, em vez de sumir da lista em silêncio.
+
+| Chave | Obrigatória | Para que serve |
+|-------|-------------|----------------|
+| `db_host`, `db_user`, `db_password` | no modo `direct` | Banco do cliente. Não há `localhost` implícito aqui: esquecer o host apontaria para a máquina local |
+| `db_port`, `db_service`, `db_service_name`, `db_database` | não | Como no `.env` (porta segue o banco: 1521 ou 1433) |
+| `dbe_url`, `dbe_user`, `dbe_password` | no modo `dbe` | Sankhya do cliente e credencial da aplicação |
+| `db_type` | não (`oracle`) | O banco do cliente: `oracle` ou `sqlserver`. Pode diferir entre clientes |
+| `db_schema` | não | Schema das tabelas, como `SANKHYA_DB_SCHEMA` |
+| `descricao` | não | Texto mostrado em `list_clients` |
+| `default` | não | `true` marca o cliente usado quando a chamada não informa `client`. **No máximo um**; dois derrubam a subida |
+
+As chaves seguem o nome da variável do `.env` sem o `SANKHYA_` (`db_type` ↔ `SANKHYA_DB_TYPE`). Chave desconhecida (`pasword`, `mode`, `db_hots`) é erro, não é ignorada: o modo é do processo, não do cliente. O nome do cliente não distingue maiúsculas de minúsculas. No modo `direct` cada cliente Oracle tem o seu pool de conexões.
+
+**Como o cliente é escolhido.** Toda tool de banco recebe o parâmetro `client`; `list_clients` mostra os cadastrados, sem credenciais.
+- `client` informado: vale esse cliente.
+- `client` omitido: vale o `default`. Sem `default` e com mais de um cliente, a tool **recusa** e lista os clientes, sem executar nada.
+- Com mais de um cliente cadastrado, toda resposta começa com `Cliente: acme · Oracle · DBE`, para você conferir qual banco respondeu.
+
+O MCP não pergunta nada sozinho: quem decide é o Claude, a partir do que você disse. As instruções do servidor mandam perguntar quando o cliente não está claro, em vez de adivinhar. Para não ser perguntado toda vez, marque um `default` ou diga o cliente padrão do projeto no `CLAUDE.md`.
+
+**Onde fica o arquivo.** Ordem de busca: `SANKHYA_CLIENTS_FILE` (que precisa existir), depois `clients.json` na raiz do MCP. Para um cadastro por projeto, ponha `SANKHYA_CLIENTS_FILE=/caminho/clients.json` no `.sankhya-mcp.env` do projeto. Sem arquivo, as variáveis `SANKHYA_*` do `.env` valem como um único cliente chamado `default`. Com o arquivo, as variáveis de conexão do `.env` (`SANKHYA_DB_HOST`, `SANKHYA_DBE_URL` etc.) não são usadas; `SANKHYA_MODE` continua obrigatório.
+
+**Credenciais.** O arquivo guarda as senhas em texto puro e está no `.gitignore`: use `chmod 600 clients.json` (o servidor avisa se outros usuários da máquina podem lê-lo). O cadastro é feito só editando o arquivo. Não há tool para cadastrar cliente de propósito: a senha passaria pela conversa e ficaria no histórico.
 
 ### Configuração por projeto (override)
 
@@ -270,7 +355,7 @@ Busque a entidade "Parceiro"
 
 - Apenas `SELECT` é permitido — comandos DML/DDL (INSERT, UPDATE, DELETE, DROP etc.) são bloqueados por uma allowlist textual na aplicação
 - A validação é textual e não cobre tudo: uma função que já existe no schema com `PRAGMA AUTONOMOUS_TRANSACTION`, chamada em `SELECT pacote.funcao(x) FROM DUAL`, grava mesmo assim
-- A conexão é local — nenhum dado sai da máquina
+- A conexão é local — nenhum dado sai da máquina. No modo DBE a consulta sai por HTTP até o Sankhya configurado em `SANKHYA_DBE_URL`: prefira `https` fora da rede interna, porque usuário e senha viajam no login
 - Credenciais ficam no `.env` local, fora do controle de versão
 - `SELECT ... INTO` é rejeitado pela allowlist. No Oracle não é sintaxe válida em SQL puro; no SQL Server **criaria tabela** — escrita disfarçada de leitura, e lá não existe `READ ONLY` de sessão para recusá-la
 - Como o usuário recomendado é somente-leitura e normalmente **não** é o dono das tabelas, defina `SANKHYA_DB_SCHEMA` com o schema onde elas moram (ver abaixo) — sem isso, parte das tools responde "objeto não existe"
@@ -377,6 +462,8 @@ sankhya-schema-mcp/
 ├── src/
 │   ├── server.py          # Servidor MCP: tools, formatação e validação
 │   ├── dialects.py        # Queries, conexão e transação por banco (Oracle/SQL Server)
+│   ├── dbe.py             # Modo DBE: login no Sankhya e consultas pelo DB Explorer
+│   ├── clients.py         # Clientes: cadastro (clients.json), seleção e cliente ativo da chamada
 │   ├── updates.py         # Consulta de versão publicada e aviso de atualização
 │   └── version.py         # Versão do projeto (fonte única)
 ├── tools/
@@ -386,6 +473,7 @@ sankhya-schema-mcp/
 ├── .venv/                 # Ambiente virtual Python (criado pelo setup)
 ├── .env                   # Credenciais do banco (não versionado)
 ├── .env.example           # Modelo de credenciais
+├── clients.example.json   # Modelo do cadastro de clientes (modo DBE)
 ├── start.ps1              # Script de inicialização (Windows)
 ├── start.sh               # Script de inicialização (Linux)
 ├── setup.ps1              # Instalador automático (Windows)

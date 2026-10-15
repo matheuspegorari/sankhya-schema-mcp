@@ -6,23 +6,53 @@ Execute:
     Linux:   .venv/bin/python test_server.py
 """
 
+import os
+import dataclasses
 import re
 import sys
 import tempfile
 from contextlib import contextmanager
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+# Hermético: o modo e o cadastro de clientes vêm daqui, e não do `.env` nem de um
+# `clients.json` que o desenvolvedor tenha na pasta. Precisa vir antes dos imports
+# abaixo: `clients.py` monta o cadastro quando é importado.
+os.environ["SANKHYA_MODE"] = "direct"
+_cadastro_dos_testes = Path(tempfile.mkdtemp()) / "clients.json"
+_cadastro_dos_testes.write_text(
+    '{"default": {"default": true, "db_type": "oracle", "db_host": "localhost",'
+    ' "db_user": "SANKHYA", "db_password": "developer"}}',
+    encoding="utf-8",
+)
+os.environ["SANKHYA_CLIENTS_FILE"] = str(_cadastro_dos_testes)
+
+
+# Os testes rodam contra o cliente `default` montado do ambiente, e cada trecho
+# que precisa de outro dialeto, schema ou modo o troca por um instante.
+@contextmanager
+def _como(**mudancas):
+    """Ativa uma cópia do cliente ativo com `mudancas` aplicadas, só dentro do bloco."""
+    with use_client(dataclasses.replace(active_client(), **mudancas)) as cliente:
+        yield cliente
+
+
+import clients  # noqa: E402
+import dbe  # noqa: E402
 import dialects  # noqa: E402
 import server  # noqa: E402
 import updates  # noqa: E402
+from clients import Client, active_client, use_client  # noqa: E402
 from dialects import (  # noqa: E402
     BEGIN_READ_ONLY,
     QUERIES,
+    group_prefix_counts,
     group_prefixes,
     resolve_db_type,
+    resolve_mode,
     resolve_schema,
     schema_prefix,
 )
@@ -103,15 +133,11 @@ def test_markdown_escapa_pipe():
 
 def test_owner_unico_por_tabela():
     # Com a tabela em vários schemas visíveis, vence o do usuário conectado.
-    original = server.DB_CONFIG["user"]
-    server.DB_CONFIG["user"] = "sankhya"
-    try:
+    with _como(user="sankhya"):
         assert pick_owner({"AUDIT", "SANKHYA", "TESTE"}) == "SANKHYA"
         # Sem o schema conectado entre eles, vence o primeiro em ordem alfabética.
         assert pick_owner({"TESTE", "AUDIT"}) == "AUDIT"
         assert pick_owner({"AUDIT"}) == "AUDIT"
-    finally:
-        server.DB_CONFIG["user"] = original
 
 
 def test_aviso_de_truncamento():
@@ -240,12 +266,13 @@ def _fetch_com_banco_falso(total, limit, db_type="oracle"):
     def _connect_falso():
         yield _FakeConn(cursor)
 
-    original_connect, original_tipo = server.connect, server.DB_TYPE
-    server.connect, server.DB_TYPE = _connect_falso, db_type
+    original_connect = server.connect
+    server.connect = _connect_falso
     try:
-        rows, truncated = server.fetch_rows("SELECT 1 FROM DUAL", limit=limit)
+        with _como(db_type=db_type):
+            rows, truncated = server.fetch_rows("SELECT 1 FROM DUAL", limit=limit)
     finally:
-        server.connect, server.DB_TYPE = original_connect, original_tipo
+        server.connect = original_connect
     return rows, truncated, cursor
 
 
@@ -309,12 +336,8 @@ def test_sessao_sqlserver_abre_transacao_explicita():
 @contextmanager
 def _dialeto(tipo):
     """Ativa um dialeto para o trecho, e devolve o anterior ao sair."""
-    original = dialects.DB_TYPE
-    dialects.DB_TYPE = tipo
-    try:
+    with _como(db_type=tipo):
         yield
-    finally:
-        dialects.DB_TYPE = original
 
 
 def test_selecao_de_dialeto_por_env():
@@ -499,12 +522,8 @@ def test_bloqueio_de_into_nao_pega_palavra_composta():
 
 def _com_schema(valor):
     """Roda schema_prefix() com SANKHYA_DB_SCHEMA temporariamente redefinido."""
-    original = dialects.DB_CONFIG["schema"]
-    dialects.DB_CONFIG["schema"] = valor
-    try:
+    with _como(schema=valor):
         return schema_prefix()
-    finally:
-        dialects.DB_CONFIG["schema"] = original
 
 
 def test_schema_ausente_nao_qualifica_nada():
@@ -533,9 +552,7 @@ def test_schema_invalido_falha_alto():
 
 def test_schema_qualifica_amostra_e_tddins_nos_dois_bancos():
     # As quatro referências não qualificadas: a amostra e as três do TDDINS.
-    original = dialects.DB_CONFIG["schema"]
-    dialects.DB_CONFIG["schema"] = "SANKHYA"
-    try:
+    with _como(schema="SANKHYA"):
         with _dialeto("oracle"):
             assert dialects.query("table_sample", tabela="TGFCAB") == (
                 "SELECT * FROM SANKHYA.TGFCAB WHERE ROWNUM <= :1"
@@ -547,20 +564,14 @@ def test_schema_qualifica_amostra_e_tddins_nos_dois_bancos():
                 "SELECT TOP (%s) * FROM SANKHYA.TGFCAB"
             )
             assert "FROM SANKHYA.TDDINS" in dialects.query("resolve_table")
-    finally:
-        dialects.DB_CONFIG["schema"] = original
 
 
 def test_alter_session_so_no_oracle():
     # No SQL Server o schema padrão vem do mapeamento do login: persistente e
     # com privilégio, não é papel deste servidor mexer. Lá vale o qualificador.
     cursor = _FakeCursor(0)
-    original = dialects.DB_CONFIG["schema"]
-    dialects.DB_CONFIG["schema"] = "SANKHYA"
-    try:
+    with _como(schema="SANKHYA"):
         dialects._set_current_schema(_FakeConn(cursor), None)
-    finally:
-        dialects.DB_CONFIG["schema"] = original
     assert cursor.executado == ["ALTER SESSION SET CURRENT_SCHEMA = SANKHYA"]
 
 
@@ -689,7 +700,7 @@ def test_dicionario_ausente_degrada_mas_erro_real_sobe():
 
     def nega(*_a, **_kw):
         raise Exception("ORA-00942: table or view does not exist"
-                        if dialects.DB_TYPE == "oracle" else "Invalid object name 'TDDCAM'")
+                        if active_client().db_type == "oracle" else "Invalid object name 'TDDCAM'")
 
     server.execute_query = nega
     try:
@@ -733,20 +744,15 @@ def test_opcoes_tem_a_mesma_ordem_nos_dois_bancos():
 def test_dicionario_qualifica_schema_e_bind_nos_dois_bancos():
     # Sem o prefixo de schema o banco resolve TDDCAM no schema do usuário
     # conectado, que num login somente-leitura não é o dono das tabelas.
-    schema_original, dialeto_original = dialects.DB_CONFIG["schema"], dialects.DB_TYPE
-    dialects.DB_CONFIG["schema"] = "SANKHYA"
-    try:
+    with _como(schema="SANKHYA"):
         for dialeto, bind in (("oracle", ":1"), ("sqlserver", "%s")):
-            dialects.DB_TYPE = dialeto
-            for nome in ("field_dict", "field_options", "links"):
-                sql = dialects.query(nome)
-                assert "{" not in sql, f"{nome}/{dialeto}: sobrou placeholder"
-                assert "SANKHYA.TDD" in sql, f"{nome}/{dialeto}"
-                # Um bind por placeholder: o pymssql não reaproveita `%s`.
-                assert sql.count(bind) == 1, f"{nome}/{dialeto}"
-    finally:
-        dialects.DB_CONFIG["schema"] = schema_original
-        dialects.DB_TYPE = dialeto_original
+            with _dialeto(dialeto):
+                for nome in ("field_dict", "field_options", "links"):
+                    sql = dialects.query(nome)
+                    assert "{" not in sql, f"{nome}/{dialeto}: sobrou placeholder"
+                    assert "SANKHYA.TDD" in sql, f"{nome}/{dialeto}"
+                    # Um bind por placeholder: o pymssql não reaproveita `%s`.
+                    assert sql.count(bind) == 1, f"{nome}/{dialeto}"
 
 
 # --- Versão e aviso de atualização -----------------------------------------
@@ -938,18 +944,14 @@ def test_busca_sem_dicionario_nao_perde_linha():
 def test_filtro_opcional_da_busca_de_campo_vale_nos_dois_bancos():
     # O dicionário não tem alias de tabela: o filtro usa a coluna crua, e o
     # placeholder precisa ser resolvido igual ao da consulta de catálogo.
-    dialeto_original = dialects.DB_TYPE
-    try:
-        for dialeto, bind in (("oracle", ":2"), ("sqlserver", "%s")):
-            dialects.DB_TYPE = dialeto
+    for dialeto, bind in (("oracle", ":2"), ("sqlserver", "%s")):
+        with _dialeto(dialeto):
             com = dialects.query("column_descriptions", filtro="AND NOMETAB LIKE {p2}")
             assert "{" not in com, dialeto
             assert bind in com, dialeto
             sem = dialects.query("column_descriptions", filtro="")
             assert "{" not in sem, dialeto
             assert "NOMETAB LIKE" not in sem, dialeto
-    finally:
-        dialects.DB_TYPE = dialeto_original
 
 
 def test_ci_roda_os_testes_em_push_e_pr():
@@ -1055,6 +1057,1010 @@ def test_instrucoes_exigem_consultar_dominio_antes_do_literal():
     assert "LITERAIS EM WHERE" in instrucoes
     assert "describe_table" in instrucoes
     assert "opcoes" in instrucoes
+
+
+# --- Modo DBE: DB Explorer do Sankhya --------------------------------------
+
+
+def test_modo_e_obrigatorio():
+    # Sem padrão: um valor assumido abriria conexão com o banco justamente onde
+    # só o DB Explorer é alcançável, e o erro viria como "conexão recusada".
+    for ausente in (None, "", "   "):
+        try:
+            resolve_mode(ausente)
+        except ValueError as exc:
+            assert "obrigatório" in str(exc) and "SANKHYA_MODE" in str(exc)
+        else:
+            raise AssertionError(f"modo {ausente!r} deveria falhar")
+    assert resolve_mode("direct") == "direct"
+    assert resolve_mode(" DBE ") == "dbe"
+    try:
+        resolve_mode("dbx")
+    except ValueError as exc:
+        assert "SANKHYA_MODE" in str(exc) and "inválido" in str(exc)
+    else:
+        raise AssertionError("modo desconhecido deveria falhar alto")
+
+
+def test_boot_sem_modo_falha_mesmo_com_cadastro():
+    caminho = _arquivo(_JSON_DOIS_DIRECT)
+    try:
+        clients.load_clients({"SANKHYA_CLIENTS_FILE": str(caminho)})
+    except ValueError as exc:
+        assert "SANKHYA_MODE" in str(exc)
+    else:
+        raise AssertionError("sem SANKHYA_MODE o boot deveria falhar")
+
+
+def test_cliente_do_ambiente_so_exige_dbe_no_modo_dbe():
+    # Modo direto não precisa saber que o DB Explorer existe.
+    direto = clients.client_from_env({"SANKHYA_MODE": "direct"})
+    assert direto.mode == "direct" and direto.name == "default" and direto.default
+    assert direto.db_type == "oracle" and direto.port == 1521 and direto.user == "SANKHYA"
+    try:
+        clients.client_from_env({"SANKHYA_MODE": "dbe"})
+    except ValueError as exc:
+        for nome in ("SANKHYA_DBE_URL", "SANKHYA_DBE_USER", "SANKHYA_DBE_PASSWORD"):
+            assert nome in str(exc)
+    else:
+        raise AssertionError("modo dbe sem variáveis deveria falhar alto")
+    dbe_ok = clients.client_from_env({
+        "SANKHYA_MODE": "dbe",
+        "SANKHYA_DBE_URL": "http://h:8380/mge/",
+        "SANKHYA_DBE_USER": " vidya ",
+        "SANKHYA_DBE_PASSWORD": "s",
+    })
+    assert (dbe_ok.dbe_url, dbe_ok.dbe_user, dbe_ok.dbe_password) == ("http://h:8380", "vidya", "s")
+
+
+def test_cliente_do_ambiente_segue_o_banco_escolhido():
+    direto = {"SANKHYA_MODE": "direct"}
+    mssql = clients.client_from_env({**direto, "SANKHYA_DB_TYPE": "sqlserver", "SANKHYA_DB_SCHEMA": "sankhya"})
+    assert mssql.db_type == "sqlserver" and mssql.port == 1433 and mssql.schema == "SANKHYA"
+    assert clients.client_from_env({**direto, "SANKHYA_DB_PORT": "1522"}).port == 1522
+    try:
+        clients.client_from_env({**direto, "SANKHYA_DB_PORT": "abc"})
+    except ValueError as exc:
+        assert "SANKHYA_DB_PORT" in str(exc)
+    else:
+        raise AssertionError("porta inválida deveria falhar alto")
+
+
+def test_tipos_de_banco_do_cliente_batem_com_as_queries():
+    # `clients.py` não importa `dialects.py`: a lista de bancos é duplicada, e
+    # este teste é o que impede as duas de divergirem.
+    assert set(clients.DB_TYPES) == set(QUERIES)
+
+
+def test_url_dbe_reduz_ao_endereco_base():
+    for entrada in [
+        "http://h:8380",
+        "http://h:8380/",
+        "http://h:8380/mge",
+        "http://h:8380/mge/system.jsp?x=1",
+        "h:8380",
+    ]:
+        assert dbe.normalize_url(entrada) == "http://h:8380", entrada
+    assert dbe.normalize_url("https://h/mge/") == "https://h"
+    # Credencial na URL iria parar em log e em `list_clients`.
+    assert dbe.normalize_url("http://u:senha@h:8380/mge") == "http://h:8380"
+    assert dbe.normalize_url("") == ""
+    assert dbe.normalize_url(None) == ""
+
+
+def test_literal_sql_escapa_aspas():
+    # Sem bind, o escape é a única defesa contra injeção.
+    assert dbe.sql_literal("O'Brien") == "'O''Brien'"
+    assert dbe.sql_literal("x' OR '1'='1") == "'x'' OR ''1''=''1'"
+    assert dbe.sql_literal(None) == "NULL"
+    assert dbe.sql_literal(10) == "10"
+    assert dbe.sql_literal(Decimal("1.50")) == "1.50"
+
+
+def test_literal_sql_recusa_tipo_que_nao_sabe_escrever():
+    for valor in (True, b"x", object(), "a\x00b"):
+        try:
+            dbe.sql_literal(valor)
+        except (TypeError, ValueError):
+            continue
+        raise AssertionError(f"deveria recusar: {valor!r}")
+
+
+def test_inline_params_oracle_posicional_e_reaproveitavel():
+    sql = "SELECT 1 FROM T WHERE A = :1 AND B = :2 AND C = :1"
+    assert dbe.inline_params(sql, ["x", 7], "oracle") == (
+        "SELECT 1 FROM T WHERE A = 'x' AND B = 7 AND C = 'x'"
+    )
+
+
+def test_inline_params_sqlserver_na_ordem():
+    sql = "SELECT 1 FROM T WHERE A = %s AND B = %s"
+    assert dbe.inline_params(sql, ["x", 7], "sqlserver") == (
+        "SELECT 1 FROM T WHERE A = 'x' AND B = 7"
+    )
+
+
+def test_inline_params_nao_mexe_em_literal_de_texto():
+    # `:1` e `%s` dentro de aspas são dado, não placeholder.
+    assert dbe.inline_params("SELECT ':1' FROM T WHERE A = :1", ["x"], "oracle") == (
+        "SELECT ':1' FROM T WHERE A = 'x'"
+    )
+    assert dbe.inline_params("SELECT '%s' FROM T WHERE A = %s", ["x"], "sqlserver") == (
+        "SELECT '%s' FROM T WHERE A = 'x'"
+    )
+
+
+def test_inline_params_sem_parametros_devolve_o_sql_intacto():
+    # O `%s` de um LIKE escrito à mão em run_query não é placeholder.
+    sql = "SELECT * FROM T WHERE N LIKE '%s%'"
+    assert dbe.inline_params(sql, None, "sqlserver") == sql
+    assert dbe.inline_params(sql, [], "sqlserver") == sql
+
+
+def test_inline_params_com_parametro_faltando_falha():
+    for sql, tipo in [("SELECT :1, :2 FROM T", "oracle"), ("SELECT %s, %s FROM T", "sqlserver")]:
+        try:
+            dbe.inline_params(sql, ["x"], tipo)
+        except ValueError:
+            continue
+        raise AssertionError("placeholder sem parâmetro deveria falhar")
+
+
+def test_valor_injetado_fica_dentro_do_literal():
+    sql = dbe.inline_params("SELECT 1 FROM T WHERE A = :1", ["x'; DELETE FROM T; --"], "oracle")
+    assert sql == "SELECT 1 FROM T WHERE A = 'x''; DELETE FROM T; --'"
+
+
+def test_mensagem_em_base64_e_decodificada():
+    import base64
+
+    codificada = base64.b64encode("Usuário/Senha inválido.".encode()).decode()
+    assert dbe.decode_message(codificada) == "Usuário/Senha inválido."
+    # Texto comum, com espaço e pontuação, nunca é base64.
+    assert dbe.decode_message("Não autorizado.") == "Não autorizado."
+    assert dbe.decode_message("ORA-00936: expressão não encontrada") == (
+        "ORA-00936: expressão não encontrada"
+    )
+    assert dbe.decode_message(None) == ""
+
+
+class _SessaoFalsa:
+    """Responde no lugar do DbeSession: devolve (colunas, linhas, tipos, burst)."""
+
+    def __init__(self, colunas, linhas, tipos=None, burst=False):
+        self.resposta = (colunas, linhas, tipos or ["S"] * len(colunas), burst)
+        self.recebido = []
+
+    def execute(self, sql):
+        self.recebido.append(sql)
+        return self.resposta
+
+
+def test_dbe_devolve_chaves_minusculas_como_o_modo_direto():
+    sessao = _SessaoFalsa(["NUNOTA", "TIPMOV"], [[1, "P"], [2, "V"]])
+    rows, truncated = dbe.run(sessao, "SELECT 1", limit=10)
+    assert rows == [{"nunota": 1, "tipmov": "P"}, {"nunota": 2, "tipmov": "V"}]
+    assert truncated is False
+
+
+def test_dbe_corta_no_limite_e_sinaliza():
+    sessao = _SessaoFalsa(["N"], [[i] for i in range(10)])
+    rows, truncated = dbe.run(sessao, "SELECT 1", limit=3)
+    assert [r["n"] for r in rows] == [0, 1, 2]
+    assert truncated is True
+    rows, truncated = dbe.run(sessao, "SELECT 1", limit=10)
+    assert len(rows) == 10 and truncated is False
+
+
+def test_dbe_teto_do_db_explorer_sinaliza_truncamento_mesmo_sem_limite():
+    # burstLimit: a aplicação cortou em 5000. Com limit=None o chamador pediu
+    # tudo, então precisa saber que não veio tudo.
+    sessao = _SessaoFalsa(["N"], [[1], [2]], burst=True)
+    rows, truncated = dbe.run(sessao, "SELECT 1", limit=None)
+    assert len(rows) == 2 and truncated is True
+    # Com limite e o resultado cabendo nele, o corte do DB Explorer ainda vale.
+    assert dbe.run(sessao, "SELECT 1", limit=10)[1] is True
+
+
+def test_dbe_converte_data_so_em_coluna_de_data():
+    sessao = _SessaoFalsa(
+        ["DTNEG", "CEP", "OBS"],
+        [["14102026 23:13:51", "01001000", "14102026"]],
+        tipos=["H", "S", "S"],
+    )
+    linha = dbe.run(sessao, "SELECT 1", limit=1)[0][0]
+    assert linha["dtneg"] == datetime(2026, 10, 14, 23, 13, 51)
+    # Oito dígitos num VARCHAR (CEP) não pode virar data.
+    assert linha["cep"] == "01001000"
+    assert linha["obs"] == "14102026"
+
+
+def test_dbe_data_so_com_dia_e_data_invalida():
+    sessao = _SessaoFalsa(["D1", "D2"], [["01022003", "99999999"]], tipos=["D", "D"])
+    linha = dbe.run(sessao, "SELECT 1", limit=1)[0][0]
+    assert linha["d1"] == datetime(2003, 2, 1)
+    assert linha["d2"] == "99999999"
+
+
+class _HttpFalso:
+    """Troca `DbeSession._post` por respostas roteirizadas, por serviço."""
+
+    def __init__(self, respostas):
+        self.respostas = {k: list(v) for k, v in respostas.items()}
+        self.chamadas = []
+
+    def __call__(self, servico, corpo, jsessionid=None):
+        self.chamadas.append((servico, corpo, jsessionid))
+        return self.respostas[servico].pop(0)
+
+
+def _login_ok(sessao):
+    return {"status": "1", "responseBody": {"jsessionid": {"$": sessao}}}
+
+
+def _consulta_ok(valor):
+    return {
+        "status": "1",
+        "responseBody": {
+            "fieldsMetadata": [{"name": "X", "userType": "S"}],
+            "rows": [[valor]],
+            "burstLimit": False,
+        },
+    }
+
+
+def _sessao_dbe(http):
+    sessao = dbe.DbeSession("http://h:8380", "vidya", "segredo")
+    sessao._post = http
+    return sessao
+
+
+def test_dbe_login_guarda_jsessionid_e_reaproveita():
+    http = _HttpFalso({
+        "MobileLoginSP.login": [_login_ok("S1")],
+        "DbExplorerSP.executeQuery": [_consulta_ok("a"), _consulta_ok("b")],
+    })
+    sessao = _sessao_dbe(http)
+    assert sessao.execute("SELECT 1 FROM DUAL")[1] == [["a"]]
+    assert sessao.execute("SELECT 2 FROM DUAL")[1] == [["b"]]
+    servicos = [c[0] for c in http.chamadas]
+    # Um login só, mesmo com duas consultas.
+    assert servicos.count("MobileLoginSP.login") == 1
+    login = http.chamadas[0][1]
+    assert login["NOMUSU"] == {"$": "vidya"} and login["INTERNO"] == {"$": "segredo"}
+    assert all(c[2] == "S1" for c in http.chamadas[1:])
+
+
+def test_dbe_refaz_login_quando_a_sessao_expira():
+    http = _HttpFalso({
+        "MobileLoginSP.login": [_login_ok("S2")],
+        "DbExplorerSP.executeQuery": [
+            {"status": "3", "statusMessage": "Não autorizado."},
+            _consulta_ok("depois"),
+        ],
+    })
+    sessao = _sessao_dbe(http)
+    sessao._jsessionid = "S1"
+    assert sessao.execute("SELECT 1 FROM DUAL")[1] == [["depois"]]
+    assert sessao._jsessionid == "S2"
+    assert http.chamadas[-1][2] == "S2"
+
+
+def test_dbe_nao_entra_em_laco_de_login():
+    # Recusa de novo após o relogin: sobe o erro, não tenta para sempre.
+    http = _HttpFalso({
+        "MobileLoginSP.login": [_login_ok("S1"), _login_ok("S2")],
+        "DbExplorerSP.executeQuery": [
+            {"status": "3", "statusMessage": "Não autorizado."},
+            {"status": "3", "statusMessage": "Não autorizado."},
+        ],
+    })
+    sessao = _sessao_dbe(http)
+    try:
+        sessao.execute("SELECT 1 FROM DUAL")
+    except dbe.DbeError as exc:
+        assert "Não autorizado" in str(exc)
+    else:
+        raise AssertionError("deveria subir o erro")
+
+
+def test_dbe_login_recusado_nao_vaza_a_senha():
+    http = _HttpFalso({
+        "MobileLoginSP.login": [{"status": "3", "statusMessage": "Usuário/Senha inválido."}],
+    })
+    sessao = _sessao_dbe(http)
+    try:
+        sessao.execute("SELECT 1 FROM DUAL")
+    except dbe.DbeError as exc:
+        assert "Usuário/Senha inválido" in str(exc)
+        assert "segredo" not in str(exc)
+    else:
+        raise AssertionError("login recusado deveria subir")
+
+
+def test_dbe_erro_sql_sobe_com_a_mensagem_do_banco():
+    http = _HttpFalso({
+        "MobileLoginSP.login": [_login_ok("S1")],
+        "DbExplorerSP.executeQuery": [
+            {"status": "0", "statusMessage": "ORA-00942: a tabela ou view não existe"},
+        ],
+    })
+    try:
+        _sessao_dbe(http).execute("SELECT 1 FROM NADA")
+    except dbe.DbeError as exc:
+        # O `is_missing_object` do modo direto procura exatamente este código.
+        assert server.is_missing_object(exc) or active_client().db_type != "oracle"
+        assert "ORA-00942" in str(exc)
+    else:
+        raise AssertionError("erro SQL deveria subir")
+
+
+def test_dbe_remove_ponto_e_virgula_final():
+    http = _HttpFalso({
+        "MobileLoginSP.login": [_login_ok("S1")],
+        "DbExplorerSP.executeQuery": [_consulta_ok("a")],
+    })
+    _sessao_dbe(http).execute("  SELECT 1 FROM DUAL ;  ")
+    assert http.chamadas[-1][1] == {"sql": "SELECT 1 FROM DUAL"}
+
+
+def test_dbe_logout_encerra_e_esquece_a_sessao():
+    http = _HttpFalso({
+        "MobileLoginSP.login": [_login_ok("S1")],
+        "MobileLoginSP.logout": [{"status": "1"}],
+    })
+    sessao = _sessao_dbe(http)
+    sessao.login()
+    sessao.logout()
+    assert sessao._jsessionid is None
+    assert http.chamadas[-1][0] == "MobileLoginSP.logout" and http.chamadas[-1][2] == "S1"
+    sessao.logout()  # sem sessão: não chama nada
+    assert len(http.chamadas) == 2
+
+
+def test_dbe_get_session_exige_configuracao():
+    try:
+        dbe.get_session("", "", "")
+    except dbe.DbeError as exc:
+        assert "SANKHYA_DBE_URL" in str(exc)
+    else:
+        raise AssertionError("sem configuração deveria falhar")
+
+
+def test_dbe_uma_sessao_por_credencial():
+    # Cada cliente tem o seu login; a mesma credencial reaproveita o mesmo.
+    antes = dict(dbe._sessions)
+    try:
+        a = dbe.get_session("http://a:8380", "vidya", "x")
+        assert dbe.get_session("http://a:8380", "vidya", "x") is a
+        assert dbe.get_session("http://b:8380", "vidya", "x") is not a
+        assert dbe.get_session("http://a:8380", "outro", "x") is not a
+        assert dbe.get_session("http://a:8380", "vidya", "y") is not a
+    finally:
+        dbe._sessions.clear()
+        dbe._sessions.update(antes)
+
+
+@contextmanager
+def _modo_dbe(sessao, db_type="oracle"):
+    """
+    Faz do cliente único do processo um cliente DBE, com `sessao` no lugar da
+    sessão real. É cadastro, e não só cliente ativo: toda tool resolve o cliente
+    pelo cadastro ao entrar.
+    """
+    cliente = dataclasses.replace(
+        active_client(), name="dbe", mode="dbe", db_type=db_type,
+        dbe_url="http://h:8380", dbe_user="u", dbe_password="p",
+    )
+    guardado = server.get_session
+    server.get_session = lambda *a: sessao
+    try:
+        with _cadastro({"dbe": cliente}):
+            yield
+    finally:
+        server.get_session = guardado
+
+
+def test_fetch_rows_dbe_nao_abre_conexao_e_escreve_os_parametros():
+    sessao = _SessaoFalsa(["TABLE_NAME"], [["TGFCAB"]])
+    original = server.connect
+
+    def sem_conexao():
+        raise AssertionError("o modo DBE não pode abrir conexão com o banco")
+
+    server.connect = sem_conexao
+    try:
+        with _modo_dbe(sessao):
+            rows, truncated = server.fetch_rows("SELECT 1 FROM T WHERE A = :1", ["TGF'X"])
+    finally:
+        server.connect = original
+    assert rows == [{"table_name": "TGFCAB"}] and truncated is False
+    assert sessao.recebido == ["SELECT 1 FROM T WHERE A = 'TGF''X'"]
+
+
+def test_fetch_rows_dbe_respeita_o_dialeto_do_placeholder():
+    sessao = _SessaoFalsa(["X"], [[1]])
+    with _modo_dbe(sessao, db_type="sqlserver"):
+        server.fetch_rows("SELECT 1 FROM T WHERE A = %s", ["v"])
+    assert sessao.recebido == ["SELECT 1 FROM T WHERE A = 'v'"]
+
+
+def test_execute_query_dbe_recusa_resultado_cortado_sem_limite():
+    sessao = _SessaoFalsa(["N"], [[1], [2]], burst=True)
+    with _modo_dbe(sessao):
+        try:
+            server.execute_query("SELECT 1", limit=None)
+        except dbe.RowCapError as exc:
+            assert len(exc.rows) == 2
+            assert "5000" in str(exc)
+        else:
+            raise AssertionError("resultado cortado não pode passar por completo")
+        # Com limite explícito o corte vira aviso, não erro.
+        assert server.execute_query("SELECT 1", limit=10) == [{"n": 1}, {"n": 2}]
+
+
+def test_busca_aceita_descricao_parcial_com_aviso():
+    original = server.execute_query
+    parcial = [{"nometab": "TGFCAB", "descrtab": "Cabeçalho"}]
+
+    def corta(*a, **k):
+        raise dbe.RowCapError(parcial)
+
+    server.execute_query = corta
+    try:
+        rows, parcial_flag = server.partial_dictionary_rows("table_descriptions", "%A%")
+    finally:
+        server.execute_query = original
+    assert rows == parcial and parcial_flag is True
+    assert "incompletas" in server.partial_descriptions_note(True)
+    assert server.partial_descriptions_note(False) == ""
+
+
+def test_list_modules_dbe_agrega_no_banco():
+    # O catálogo passa de 5000 tabelas e o DB Explorer corta ali: a contagem
+    # precisa vir do banco, não de uma lista de nomes cortada.
+    consultas = []
+
+    def falso(sql, params=None, limit=server.DEFAULT_ROW_LIMIT):
+        consultas.append(sql)
+        return [{"prefixo": "TGF", "qtd": 1469}, {"prefixo": "XY", "qtd": 9}]
+
+    original = server.execute_query
+    server.execute_query = falso
+    try:
+        with _modo_dbe(None):
+            saida = server.list_modules()
+    finally:
+        server.execute_query = original
+    assert "GROUP BY" in consultas[0]
+    assert "| TGF | 1469 |" in saida
+    assert "XY" not in saida  # prefixo curto demais é ruído
+
+
+def test_validate_query_dbe_executa_e_avisa_que_nao_ha_plano():
+    sessao = _SessaoFalsa(["X"], [[1]])
+    original = server.explain_plan
+
+    def sem_plano(sql):
+        raise AssertionError("o DB Explorer não tem EXPLAIN PLAN")
+
+    server.explain_plan = sem_plano
+    try:
+        with _modo_dbe(sessao):
+            ok = server.validate_query("SELECT 1 FROM DUAL")
+    finally:
+        server.explain_plan = original
+    assert ok.startswith("✅") and "DBE" in ok
+    assert sessao.recebido == ["SELECT 1 FROM DUAL"]
+
+
+def test_validate_query_dbe_reporta_o_erro_do_banco():
+    class Quebrada:
+        def execute(self, sql):
+            raise dbe.DbeError('ORA-00904: "X": identificador inválido')
+
+    with _modo_dbe(Quebrada()):
+        saida = server.validate_query("SELECT X FROM DUAL")
+    assert saida.startswith("❌") and "ORA-00904" in saida
+
+
+def test_validate_query_dbe_ainda_barra_escrita():
+    sessao = _SessaoFalsa(["X"], [[1]])
+    with _modo_dbe(sessao):
+        assert server.validate_query("DELETE FROM TGFCAB").startswith("❌")
+    assert sessao.recebido == []
+
+
+def test_agrupamento_por_contagem_do_banco_equivale_ao_por_nome():
+    nomes = ["TGFCAB", "TGFITE", "tgfpar", "TSIUSU", "TSIEMP", "XYZUNICA", "AB", "123456"]
+    contagens = [
+        {"prefixo": "TGF", "qtd": 3},
+        {"prefixo": "TSI", "qtd": 2},
+        {"prefixo": "XYZ", "qtd": 1},
+        {"prefixo": "AB", "qtd": 1},
+        {"prefixo": "123", "qtd": 1},
+    ]
+    assert group_prefix_counts(contagens) == group_prefixes(nomes)
+    assert group_prefix_counts(None) == []
+
+
+def test_queries_novas_existem_nos_dois_dialetos():
+    for tipo in ("oracle", "sqlserver"):
+        with _dialeto(tipo):
+            triggers = dialects.query("triggers")
+            assert triggers.count(dialects._BIND[tipo](1)) == 1
+            prefixos = dialects.query("table_prefixes")
+            assert "GROUP BY" in prefixos
+            assert f"1, {dialects.PREFIXO_MODULO})" in prefixos
+
+
+def test_triggers_fala_o_vocabulario_de_cada_banco():
+    with _dialeto("oracle"):
+        assert "ALL_TRIGGERS" in dialects.query("triggers")
+    with _dialeto("sqlserver"):
+        sql = dialects.query("triggers")
+        assert "sys.triggers" in sql and "ExecIsInsertTrigger" in sql
+
+
+def test_get_triggers_lista_e_trata_tabela_sem_trigger():
+    original = (server.resolve_table_name, server.execute_query)
+    server.resolve_table_name = lambda nome: (nome.upper(), [])
+    server.execute_query = lambda sql, params=None, limit=None: [
+        {"owner": "SANKHYA", "trigger_name": "TRG_X", "trigger_type": "BEFORE EACH ROW",
+         "triggering_event": "INSERT OR UPDATE", "status": "ENABLED"},
+    ]
+    try:
+        saida = server.get_triggers("tgfcab")
+        server.execute_query = lambda sql, params=None, limit=None: []
+        vazio = server.get_triggers("tgfcab")
+    finally:
+        server.resolve_table_name, server.execute_query = original
+    assert "TRG_X" in saida and "INSERT OR UPDATE" in saida and "1 trigger(s)" in saida
+    assert "Nenhuma trigger" in vazio or "Nada encontrado" in vazio
+
+
+def test_instrucoes_so_falam_de_dbe_no_modo_dbe():
+    # No modo direto o texto fica como sempre foi: nada de contexto a mais.
+    assert not clients.is_multi() and active_client().mode == "direct"
+    assert "MODO DBE" not in server.mcp.instructions
+    assert "MULTI-CLIENTE" not in server.mcp.instructions
+    assert server._client_instructions() == ""
+
+
+# --- Vários clientes (clients.json, modo DBE) -------------------------------
+
+
+def _entrada(**mudancas):
+    """Uma entrada com os dois conjuntos de credencial: o modo escolhe qual vale."""
+    base = {
+        "dbe_url": "http://h:8380", "dbe_user": "vidya", "dbe_password": "segredo",
+        "db_host": "10.0.0.5", "db_user": "RO", "db_password": "segredo-db",
+    }
+    return {**base, **mudancas}
+
+
+def _tres_clientes(modo="dbe", **por_cliente):
+    return clients.parse_registry({
+        "acme": _entrada(descricao="Acme Ltda", **por_cliente.get("acme", {})),
+        "beta": _entrada(dbe_url="http://beta:8380", db_type="sqlserver", db_schema="sankhya",
+                         **por_cliente.get("beta", {})),
+        "gama": _entrada(dbe_url="https://gama", **por_cliente.get("gama", {})),
+    }, modo)
+
+
+@contextmanager
+def _cadastro(registrados):
+    """Troca o cadastro de clientes do processo pelo informado, e devolve o original."""
+    antes = dict(clients.CLIENTS)
+    clients.CLIENTS.clear()
+    clients.CLIENTS.update(registrados)
+    try:
+        yield
+    finally:
+        clients.CLIENTS.clear()
+        clients.CLIENTS.update(antes)
+
+
+def _recusa(fn, trecho):
+    try:
+        fn()
+    except clients.ClientError as exc:
+        assert trecho in str(exc), f"{trecho!r} não está em {str(exc)!r}"
+    else:
+        raise AssertionError(f"deveria recusar ({trecho})")
+
+
+def _registro(dados, modo="dbe"):
+    return clients.parse_registry(dados, modo)
+
+
+def test_cadastro_le_os_clientes_do_modo_dbe():
+    c = _tres_clientes("dbe")
+    assert list(c) == ["acme", "beta", "gama"]
+    assert all(x.mode == "dbe" for x in c.values())
+    assert c["acme"].db_type == "oracle" and c["acme"].descricao == "Acme Ltda"
+    assert c["beta"].db_type == "sqlserver" and c["beta"].schema == "SANKHYA"
+    assert c["gama"].dbe_url == "https://gama" and c["acme"].dbe_user == "vidya"
+
+
+def test_cadastro_le_os_clientes_do_modo_direct():
+    c = _registro({
+        "acme": _entrada(db_service="PROD", db_port=1522),
+        "beta": _entrada(db_type="sqlserver", db_database="erp", db_service_name="X"),
+    }, "direct")
+    assert all(x.mode == "direct" for x in c.values())
+    assert (c["acme"].host, c["acme"].port, c["acme"].sid, c["acme"].user) == ("10.0.0.5", 1522, "PROD", "RO")
+    # Porta padrão segue o banco; o que não foi dito segue o padrão do .env.
+    assert c["beta"].port == 1433 and c["beta"].database == "erp"
+    assert c["beta"].service_name == "X" and c["beta"].password == "segredo-db"
+
+
+def test_o_modo_escolhe_qual_credencial_vale():
+    so_dbe = {"dbe_url": "http://h", "dbe_user": "u", "dbe_password": "p"}
+    so_db = {"db_host": "h", "db_user": "u", "db_password": "p"}
+    # Só exige o conjunto do modo em uso: o outro pode faltar.
+    assert _registro({"a": so_dbe}, "dbe")["a"].dbe_url == "http://h"
+    assert _registro({"a": so_db}, "direct")["a"].host == "h"
+    _recusa(lambda: _registro({"a": so_dbe}, "direct"), "o modo direct exige db_host, db_user, db_password")
+    _recusa(lambda: _registro({"a": so_db}, "dbe"), "o modo dbe exige dbe_url, dbe_user, dbe_password")
+
+
+def test_cadastro_recusa_cliente_mal_formado():
+    _recusa(lambda: _registro({}), "ao menos um cliente")
+    _recusa(lambda: _registro([]), "ao menos um cliente")
+    _recusa(lambda: _registro({"a": "texto"}), "objeto")
+    _recusa(lambda: _registro({"a b": _entrada()}), "nome inválido")
+    _recusa(lambda: _registro({"a": _entrada(db_type="mysql")}), "SANKHYA_DB_TYPE")
+    _recusa(lambda: _registro({"a": _entrada(db_schema="X; DROP")}), "SANKHYA_DB_SCHEMA")
+    _recusa(lambda: _registro({"a": _entrada(db_port="abc")}), "db_port")
+    _recusa(lambda: _registro({"a": _entrada(default="sim")}), "true ou false")
+    for faltando in ("dbe_url", "dbe_user", "dbe_password"):
+        entrada = _entrada()
+        del entrada[faltando]
+        _recusa(lambda e=entrada: _registro({"a": e}), faltando)
+    for faltando in ("db_host", "db_user", "db_password"):
+        entrada = _entrada()
+        del entrada[faltando]
+        _recusa(lambda e=entrada: _registro({"a": e}, "direct"), faltando)
+
+
+def test_cadastro_direct_nao_assume_localhost():
+    # No .env o host padrão é localhost; no cadastro, esquecer o host apontaria o
+    # cliente para a máquina local sem nenhum aviso.
+    entrada = _entrada()
+    del entrada["db_host"]
+    _recusa(lambda: _registro({"a": entrada}, "direct"), "db_host")
+
+
+def test_cadastro_recusa_chave_desconhecida_em_vez_de_ignorar():
+    # `pasword` ignorado deixaria o cliente sem senha só na hora da consulta.
+    _recusa(lambda: _registro({"a": _entrada(pasword="x")}), "pasword")
+    _recusa(lambda: _registro({"a": _entrada(mode="direct")}), "mode")  # o modo é do processo
+    _recusa(lambda: _registro({"a": _entrada(db_hots="x")}), "db_hots")
+
+
+def test_cadastro_so_aceita_um_default():
+    c = _tres_clientes(acme={"default": True})
+    assert [n for n, x in c.items() if x.default] == ["acme"]
+    _recusa(lambda: _tres_clientes(acme={"default": True}, beta={"default": True}), "acme, beta")
+
+
+def test_cadastro_nome_e_case_insensitive():
+    _recusa(lambda: _registro({"Acme": _entrada(), "acme": _entrada()}), "caixa")
+
+
+def test_senha_do_cliente_nao_aparece_no_repr():
+    texto = repr(_tres_clientes()["acme"])
+    for segredo in ("segredo", "segredo-db", "developer"):
+        assert segredo not in texto
+
+
+def test_selecao_de_cliente():
+    with _cadastro(_tres_clientes(beta={"default": True})):
+        assert clients.select_client(None).name == "beta"
+        assert clients.select_client("").name == "beta"
+        assert clients.select_client("ACME").name == "acme"  # case-insensitive
+        _recusa(lambda: clients.select_client("zeta"), "não cadastrado")
+        _recusa(lambda: clients.select_client("zeta"), "`acme`, `beta`, `gama`")
+
+
+def test_sem_default_e_com_varios_clientes_o_nome_e_obrigatorio():
+    # Escolher sozinho devolveria dado do cliente errado sem erro de SQL.
+    with _cadastro(_tres_clientes()):
+        _recusa(lambda: clients.select_client(None), "Informe o cliente")
+        assert clients.select_client("gama").name == "gama"
+
+
+def test_um_cliente_so_dispensa_o_nome_e_o_default():
+    with _cadastro({"unico": _tres_clientes()["acme"]}):
+        assert clients.select_client(None).name == "acme"
+        assert not clients.is_multi()
+
+
+def test_cliente_ativo_sem_default_nao_e_escolhido_por_conta_propria():
+    with _cadastro(_tres_clientes()):
+        _recusa(active_client, "Informe o cliente")
+        with use_client(clients.CLIENTS["beta"]):
+            assert active_client().name == "beta"
+        _recusa(active_client, "Informe o cliente")  # restaurado ao sair
+
+
+def _arquivo(conteudo, nome="clients.json"):
+    diretorio = tempfile.mkdtemp()
+    caminho = Path(diretorio) / nome
+    caminho.write_text(conteudo, encoding="utf-8")
+    return caminho
+
+
+_JSON_DOIS = (
+    '{"acme": {"dbe_url": "http://a:8380", "dbe_user": "u", "dbe_password": "p"},'
+    ' "beta": {"dbe_url": "http://b:8380", "dbe_user": "u", "dbe_password": "p", "default": true}}'
+)
+_JSON_DOIS_DIRECT = (
+    '{"acme": {"db_host": "a", "db_user": "u", "db_password": "p"},'
+    ' "beta": {"db_host": "b", "db_user": "u", "db_password": "p", "default": true}}'
+)
+_ENV_DBE = {
+    "SANKHYA_MODE": "dbe",
+    "SANKHYA_DBE_URL": "http://env:8380",
+    "SANKHYA_DBE_USER": "e",
+    "SANKHYA_DBE_PASSWORD": "e",
+}
+_ENV_DIRECT = {"SANKHYA_MODE": "direct", "SANKHYA_DB_HOST": "env-host"}
+
+
+def test_cadastro_vale_nos_dois_modos():
+    dbe_ = clients.load_clients({"SANKHYA_MODE": "dbe", "SANKHYA_CLIENTS_FILE": str(_arquivo(_JSON_DOIS))})
+    assert list(dbe_) == ["acme", "beta"] and dbe_["acme"].mode == "dbe"
+    assert dbe_["beta"].default and not dbe_["acme"].default
+    direto = clients.load_clients(
+        {"SANKHYA_MODE": "direct", "SANKHYA_CLIENTS_FILE": str(_arquivo(_JSON_DOIS_DIRECT))}
+    )
+    assert list(direto) == ["acme", "beta"] and direto["acme"].mode == "direct"
+    assert direto["beta"].host == "b"
+
+
+def test_cadastro_dispensa_as_variaveis_de_conexao_do_env():
+    # Regressão: o servidor exigia SANKHYA_DBE_URL/USER/PASSWORD do .env mesmo com
+    # clients.json, que traz as credenciais de cada cliente.
+    caminho = _arquivo(_JSON_DOIS)
+    resultado = clients.load_clients({"SANKHYA_MODE": "dbe", "SANKHYA_CLIENTS_FILE": str(caminho)})
+    assert list(resultado) == ["acme", "beta"]
+
+
+def test_arquivo_com_credencial_so_do_outro_modo_derruba_o_boot():
+    # O modo vale para todos: um cliente sem as credenciais dele não ficaria de fora
+    # em silêncio, e sim apareceria como erro de subida.
+    caminho = _arquivo(_JSON_DOIS)
+    _recusa(
+        lambda: clients.load_clients({"SANKHYA_MODE": "direct", "SANKHYA_CLIENTS_FILE": str(caminho)}),
+        "o modo direct exige db_host",
+    )
+
+
+def test_arquivo_indicado_que_nao_existe_derruba_o_boot():
+    _recusa(
+        lambda: clients.load_clients({**_ENV_DBE, "SANKHYA_CLIENTS_FILE": "/nao/existe.json"}),
+        "não existe",
+    )
+
+
+def test_json_quebrado_diz_qual_arquivo():
+    caminho = _arquivo("{ nao e json")
+    _recusa(
+        lambda: clients.load_clients({**_ENV_DBE, "SANKHYA_CLIENTS_FILE": str(caminho)}),
+        str(caminho),
+    )
+
+
+def test_sem_arquivo_cai_no_cliente_do_env_nos_dois_modos():
+    original = clients.DEFAULT_CLIENTS_FILE
+    clients.DEFAULT_CLIENTS_FILE = Path(tempfile.mkdtemp()) / "clients.json"
+    try:
+        dbe_ = clients.load_clients(_ENV_DBE)
+        direto = clients.load_clients(_ENV_DIRECT)
+    finally:
+        clients.DEFAULT_CLIENTS_FILE = original
+    assert list(dbe_) == ["default"] and dbe_["default"].dbe_url == "http://env:8380"
+    assert list(direto) == ["default"] and direto["default"].host == "env-host"
+
+
+def test_clients_json_na_raiz_e_usado_sem_variavel():
+    original = clients.DEFAULT_CLIENTS_FILE
+    clients.DEFAULT_CLIENTS_FILE = _arquivo(_JSON_DOIS_DIRECT)
+    try:
+        assert list(clients.load_clients(_ENV_DIRECT)) == ["acme", "beta"]
+    finally:
+        clients.DEFAULT_CLIENTS_FILE = original
+
+
+class _OracledbFalso:
+    """Registra o que o servidor pede ao driver, sem conectar em nada."""
+
+    def __init__(self):
+        self.inits, self.pools = 0, []
+
+    def init_oracle_client(self, lib_dir):
+        self.inits += 1
+
+    def makedsn(self, host, port, sid=None, service_name=None):
+        return f"{host}:{port}/{service_name or sid}"
+
+    def create_pool(self, **kw):
+        self.pools.append(kw)
+        return object()
+
+
+def test_pool_oracle_e_por_cliente_e_o_instant_client_inicia_uma_vez():
+    falso = _OracledbFalso()
+    original = sys.modules.get("oracledb")
+    sys.modules["oracledb"] = falso
+    pools_antes, pronto_antes = dict(dialects._pools), dialects._instantclient_pronto
+    dialects._pools.clear()
+    dialects._instantclient_pronto = False
+    try:
+        c = _registro({
+            "a": _entrada(db_host="ha", db_schema="sankhya"),
+            "b": _entrada(db_host="hb", db_service_name="SVC"),
+            "c": _entrada(db_host="hb", db_service="SVC"),  # mesmo texto de b, mas como SID
+        }, "direct")
+        with use_client(c["a"]):
+            pool_a = dialects._oracle_pool()
+            assert dialects._oracle_pool() is pool_a  # reaproveita
+        with use_client(c["b"]):
+            pool_b = dialects._oracle_pool()
+            assert pool_b is not pool_a
+        with use_client(c["c"]):
+            assert dialects._oracle_pool() is not pool_b
+    finally:
+        dialects._pools.clear()
+        dialects._pools.update(pools_antes)
+        dialects._instantclient_pronto = pronto_antes
+        if original is None:
+            del sys.modules["oracledb"]
+        else:
+            sys.modules["oracledb"] = original
+    assert falso.inits == 1 and len(falso.pools) == 3
+    a, b, _ = falso.pools
+    assert a["dsn"] == "ha:1521/XE" and b["dsn"] == "hb:1521/SVC"
+    assert a["user"] == "RO" and a["password"] == "segredo-db"
+    # O schema é de cada cliente: só o `a` aponta a sessão.
+    assert a["session_callback"] is not None and b["session_callback"] is None
+    cursor = _FakeCursor(0)
+    a["session_callback"](_FakeConn(cursor), None)
+    assert cursor.executado == ["ALTER SESSION SET CURRENT_SCHEMA = SANKHYA"]
+
+
+def test_resposta_traz_o_cliente_so_quando_ha_mais_de_um():
+    sessao = _SessaoFalsa(["X"], [[1]])
+    original = server.get_session
+    server.get_session = lambda *a: sessao
+    try:
+        with _cadastro(_tres_clientes(acme={"default": True})):
+            multi = server.run_query("SELECT 1 FROM DUAL")
+            assert multi.startswith("> **Cliente:** acme · Oracle · DBE\n\n")
+            assert server.run_query("SELECT 1 FROM DUAL", client="beta").startswith(
+                "> **Cliente:** beta · SQL Server · DBE"
+            )
+        with _cadastro({"unico": _tres_clientes()["acme"]}):
+            assert "Cliente:" not in server.run_query("SELECT 1 FROM DUAL")
+    finally:
+        server.get_session = original
+
+
+def test_tool_sem_cliente_e_sem_default_nao_executa_nada():
+    sessao = _SessaoFalsa(["X"], [[1]])
+    original = server.get_session
+    server.get_session = lambda *a: sessao
+    try:
+        with _cadastro(_tres_clientes()):
+            saida = server.run_query("SELECT 1 FROM DUAL")
+            assert saida.startswith("❌") and "Informe o cliente" in saida
+            assert server.run_query("SELECT 1", client="zeta").startswith("❌")
+    finally:
+        server.get_session = original
+    assert sessao.recebido == []
+
+
+def test_cada_cliente_consulta_o_seu_sankhya_com_o_seu_dialeto():
+    # O ponto da feature: a mesma tool, clientes diferentes, SQL e destino de cada um.
+    chamadas = []
+
+    class Registra:
+        def __init__(self, url):
+            self.url = url
+
+        def execute(self, sql):
+            chamadas.append((self.url, sql))
+            return (["TRIGGER_NAME"], [["TRG"]], ["S"], False)
+
+    original = (server.get_session, server.resolve_table_name)
+    server.get_session = lambda url, user, senha: Registra(url)
+    server.resolve_table_name = lambda nome: (nome.upper(), [])
+    try:
+        with _cadastro(_tres_clientes()):
+            server.get_triggers("TGFCAB", client="acme")
+            server.get_triggers("TGFCAB", client="beta")
+    finally:
+        server.get_session, server.resolve_table_name = original
+    (url_a, sql_a), (url_b, sql_b) = chamadas
+    assert url_a == "http://h:8380" and "ALL_TRIGGERS" in sql_a and "'TGFCAB'" in sql_a
+    assert url_b == "http://beta:8380" and "sys.triggers" in sql_b and "'TGFCAB'" in sql_b
+
+
+def test_schema_do_cliente_qualifica_so_as_consultas_dele():
+    with _cadastro(_tres_clientes()):
+        with use_client(clients.CLIENTS["beta"]):
+            assert "SANKHYA.TDDINS" in dialects.query("resolve_table")
+        with use_client(clients.CLIENTS["acme"]):
+            assert "SANKHYA." not in dialects.query("resolve_table")
+
+
+def test_list_clients_marca_o_default_e_nao_vaza_credencial():
+    with _cadastro(_tres_clientes(beta={"default": True})):
+        saida = server.list_clients()
+    assert "acme" in saida and "beta" in saida and "gama" in saida
+    assert "Acme Ltda" in saida and "http://beta:8380" in saida
+    assert "| beta | sim |" in saida and "| acme |  |" in saida
+    for segredo in ("segredo", "vidya"):
+        assert segredo not in saida
+
+
+def test_instrucoes_multi_cliente_listam_os_clientes_e_mandam_perguntar():
+    with _cadastro(_tres_clientes(acme={"default": True})):
+        texto = server._client_instructions()
+    assert "MODO DBE" in texto and "MULTI-CLIENTE" in texto
+    assert "`acme`, `beta`, `gama`" in texto
+    assert "O cliente padrão é `acme`" in texto
+    assert "PERGUNTE" in texto
+    assert "segredo" not in texto
+    with _cadastro(_tres_clientes()):
+        assert "`client` é obrigatório" in server._client_instructions()
+
+
+def test_modo_direct_com_varios_clientes_conecta_em_cada_um():
+    # O mesmo cadastro vale no modo direto: cada cliente abre a sua conexão.
+    visto = []
+
+    @contextmanager
+    def conexao_falsa():
+        cliente = active_client()
+        visto.append((cliente.name, cliente.host, cliente.db_type))
+        yield _FakeConn(_FakeCursor(1))
+
+    c = _registro({
+        "acme": _entrada(db_host="host-acme"),
+        "beta": _entrada(db_host="host-beta", db_type="sqlserver"),
+    }, "direct")
+    original = server.connect
+    server.connect = conexao_falsa
+    try:
+        with _cadastro(c):
+            saida_a = server.run_query("SELECT 1 FROM DUAL", client="acme")
+            saida_b = server.run_query("SELECT 1", client="beta")
+            recusa = server.run_query("SELECT 1 FROM DUAL")
+    finally:
+        server.connect = original
+    assert visto == [("acme", "host-acme", "oracle"), ("beta", "host-beta", "sqlserver")]
+    assert saida_a.startswith("> **Cliente:** acme · Oracle · direto")
+    assert saida_b.startswith("> **Cliente:** beta · SQL Server · direto")
+    assert recusa.startswith("❌") and "Informe o cliente" in recusa
+
+
+def test_instrucoes_do_modo_direct_com_varios_clientes_nao_falam_de_dbe():
+    with _cadastro(_registro({"a": _entrada(), "b": _entrada(default=True)}, "direct")):
+        texto = server._client_instructions()
+    assert "MULTI-CLIENTE" in texto and "MODO DBE" not in texto
+    assert "O cliente padrão é `b`" in texto
+
+
+def test_toda_tool_com_banco_aceita_client():
+    import inspect
+
+    sem_banco = {"list_clients", "check_updates"}
+    for tool in server.mcp._tool_manager.list_tools():
+        params = inspect.signature(tool.fn).parameters
+        assert ("client" in params) == (tool.name not in sem_banco), tool.name
 
 
 if __name__ == "__main__":

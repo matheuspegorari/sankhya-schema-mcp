@@ -66,7 +66,7 @@ Este guia cobre a instalação completa do servidor MCP que conecta o Claude Cod
 Abra o PowerShell 7 (pwsh) e execute:
 
 ```powershell
-git clone https://github.com/frshaka/sankhya-schema-mcp.git
+git clone https://github.com/matheuspegorari/sankhya-schema-mcp.git
 cd sankhya-schema-mcp
 ```
 
@@ -143,6 +143,7 @@ Copy-Item .env.example .env
 Edite o arquivo `.env` com as credenciais do seu ambiente:
 
 ```ini
+SANKHYA_MODE=direct
 SANKHYA_DB_HOST=localhost
 SANKHYA_DB_PORT=1521
 SANKHYA_DB_SERVICE=XE
@@ -179,7 +180,7 @@ sudo yum install -y libaio
 ### Passo 2 — Clonar o repositório
 
 ```bash
-git clone https://github.com/frshaka/sankhya-schema-mcp.git
+git clone https://github.com/matheuspegorari/sankhya-schema-mcp.git
 cd sankhya-schema-mcp
 ```
 
@@ -255,6 +256,7 @@ nano .env   # ou vim, code, etc.
 Edite com as credenciais do seu ambiente:
 
 ```ini
+SANKHYA_MODE=direct
 SANKHYA_DB_HOST=localhost
 SANKHYA_DB_PORT=1521
 SANKHYA_DB_SERVICE=XE
@@ -348,6 +350,7 @@ As credenciais ficam no arquivo `.env` na raiz do projeto. Este arquivo **não �
 
 | Variável | Descrição | Valor padrão |
 |----------|-----------|--------------|
+| `SANKHYA_MODE` | Como o MCP chega ao banco: `direct` (conecta pelo driver) ou `dbe` (consulta pelo DB Explorer do Sankhya). **Obrigatória**: sem ela o servidor não sobe | _(nenhum)_ |
 | `SANKHYA_DB_HOST` | IP ou hostname do servidor Oracle | `localhost` |
 | `SANKHYA_DB_PORT` | Porta do listener Oracle | `1521` |
 | `SANKHYA_DB_SERVICE` | SID do banco | `XE` |
@@ -359,6 +362,7 @@ As credenciais ficam no arquivo `.env` na raiz do projeto. Este arquivo **não �
 
 **Desenvolvimento local (Docker):**
 ```ini
+SANKHYA_MODE=direct
 SANKHYA_DB_HOST=localhost
 SANKHYA_DB_PORT=1521
 SANKHYA_DB_SERVICE=XE
@@ -368,6 +372,7 @@ SANKHYA_DB_PASSWORD=developer
 
 **Servidor de homologação:**
 ```ini
+SANKHYA_MODE=direct
 SANKHYA_DB_HOST=192.168.1.50
 SANKHYA_DB_PORT=1521
 SANKHYA_DB_SERVICE=SANKHYA
@@ -377,6 +382,7 @@ SANKHYA_DB_PASSWORD=senha_homolog
 
 **Servidor de produção (conexão por service name):**
 ```ini
+SANKHYA_MODE=direct
 SANKHYA_DB_HOST=10.0.0.100
 SANKHYA_DB_PORT=1521
 # Service name tem precedência sobre o SID quando informado
@@ -400,6 +406,7 @@ Apenas as variáveis presentes no `.sankhya-mcp.env` são sobrescritas; as demai
 
 Exemplo de `.sankhya-mcp.env` (projeto que conecta por service name em outro host):
 ```ini
+SANKHYA_MODE=direct
 SANKHYA_DB_HOST=10.100.56.7
 SANKHYA_DB_SERVICE_NAME=MEUBANCO.EXEMPLO.COM.BR
 SANKHYA_DB_USER=USUARIO_PROJETO
