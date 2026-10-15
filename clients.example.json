@@ -1,6 +1,7 @@
 {
   "acme": {
     "descricao": "Acme Ltda",
+    "mode": "dbe",
     "default": true,
     "db_type": "oracle",
     "db_schema": "SANKHYA",
@@ -15,6 +16,7 @@
   },
   "beta": {
     "descricao": "Beta SA",
+    "mode": "direct",
     "db_type": "sqlserver",
     "db_schema": "SANKHYA",
     "db_host": "10.0.0.9",

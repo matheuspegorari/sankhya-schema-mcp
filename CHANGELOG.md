@@ -10,6 +10,22 @@ A tool `check_updates` do próprio servidor compara a versão instalada com a
 de cada release no GitHub** são geradas a partir da seção correspondente deste
 arquivo. Uma seção vazia reprova a publicação.
 
+## [2.1.0] - 2026-10-15
+
+### Alterado
+
+- **O modo é de cada cliente.** No `clients.json`, cada entrada declara o próprio
+  `mode` (`direct` ou `dbe`, obrigatório) e traz as credenciais dele (`db_*` ou
+  `dbe_*`). Um mesmo servidor mistura clientes diretos e DBE. Antes, o
+  `SANKHYA_MODE` valia para o processo inteiro e todos os clientes eram de um modo
+  só. Quem já tem `clients.json` precisa acrescentar `"mode"` a cada cliente; sem
+  ele a subida falha e diz qual cliente está sem.
+- `SANKHYA_MODE` só é lido (e continua obrigatório) quando não há `clients.json`:
+  nesse caso o `.env` monta um cliente só, `default`. Com o arquivo, o `.env` não
+  entra mais para modo nem para conexão.
+- As instruções do servidor dizem a quais clientes o limite do DB Explorer vale
+  quando os modos estão misturados.
+
 ## [2.0.0] - 2026-10-14
 
 ### Adicionado

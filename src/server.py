@@ -7,10 +7,11 @@ O banco é escolhido por `SANKHYA_DB_TYPE` (`oracle` por padrão). Tudo que muda
 de um banco para o outro — queries de catálogo, conexão, transação de leitura,
 plano de execução — vive em `dialects.py`.
 
-`SANKHYA_MODE=dbe` troca a conexão com o banco pelo DB Explorer do Sankhya: o
-login é feito com usuário e senha da aplicação e toda consulta vai por ele
-(ver `dbe.py`). Nesse modo o `clients.json` cadastra vários clientes, cada um com
-o seu Sankhya e o seu banco; cada tool recebe `client` e roda contra aquele
+O modo de acesso é de cada cliente: `direct` conecta no banco pelo driver e `dbe`
+troca a conexão pelo DB Explorer do Sankhya: o login é feito com usuário e senha
+da aplicação e toda consulta vai por ele (ver `dbe.py`). O `clients.json`
+cadastra vários clientes, cada um com o seu modo, o seu Sankhya e o seu banco, e
+um mesmo servidor mistura os dois; cada tool recebe `client` e roda contra aquele
 cliente (ver `clients.py`).
 """
 
@@ -75,7 +76,7 @@ def fetch_rows(
     (colunas, índices, FKs), onde o volume é limitado pela própria tabela e um
     corte esconderia parte do schema.
 
-    No modo DBE (`SANKHYA_MODE=dbe`) a consulta vai ao DB Explorer, sem conexão com
+    Num cliente DBE (`mode: "dbe"`) a consulta vai ao DB Explorer, sem conexão com
     o banco. Lá o teto é do próprio DB Explorer (5000 linhas): com `limit=None`,
     `truncado` volta True se ele cortou o resultado, e `execute_query` recusa.
 
@@ -547,12 +548,21 @@ def _client_instructions() -> str:
     """
     clientes = list(CLIENTS.values())
     texto = ""
-    if any(c.mode == "dbe" for c in clientes):
+    dbe = [c for c in clientes if c.mode == "dbe"]
+    if dbe:
+        # Com modos misturados, o modelo precisa saber a quais clientes o limite vale.
+        quais = (
+            " Vale para: " + ", ".join(f"`{c.name}`" for c in dbe) + "; os demais conectam direto no banco."
+            if len(dbe) < len(clientes)
+            else ""
+        )
         texto += (
             "MODO DBE: as consultas passam pelo DB Explorer do Sankhya, não por "
             "conexão com o banco. Só SELECT/WITH, no máximo 5000 linhas por consulta "
             "e sem EXPLAIN PLAN. A sintaxe continua a do banco por trás"
-            + (" de cada cliente.\n\n" if is_multi() else f" ({clientes[0].db_type}).\n\n")
+            + (" de cada cliente." if is_multi() else f" ({clientes[0].db_type}).")
+            + quais
+            + "\n\n"
         )
     if is_multi():
         padrao = default_client()
