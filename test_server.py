@@ -1902,12 +1902,16 @@ def test_pool_oracle_e_por_cliente_e_o_instant_client_inicia_uma_vez():
         c = _registro({
             "a": _entrada(db_host="ha", db_schema="sankhya"),
             "b": _entrada(db_host="hb", db_service_name="SVC"),
+            "c": _entrada(db_host="hb", db_service="SVC"),  # mesmo texto de b, mas como SID
         }, "direct")
         with use_client(c["a"]):
             pool_a = dialects._oracle_pool()
             assert dialects._oracle_pool() is pool_a  # reaproveita
         with use_client(c["b"]):
-            assert dialects._oracle_pool() is not pool_a
+            pool_b = dialects._oracle_pool()
+            assert pool_b is not pool_a
+        with use_client(c["c"]):
+            assert dialects._oracle_pool() is not pool_b
     finally:
         dialects._pools.clear()
         dialects._pools.update(pools_antes)
@@ -1916,8 +1920,8 @@ def test_pool_oracle_e_por_cliente_e_o_instant_client_inicia_uma_vez():
             del sys.modules["oracledb"]
         else:
             sys.modules["oracledb"] = original
-    assert falso.inits == 1 and len(falso.pools) == 2
-    a, b = falso.pools
+    assert falso.inits == 1 and len(falso.pools) == 3
+    a, b, _ = falso.pools
     assert a["dsn"] == "ha:1521/XE" and b["dsn"] == "hb:1521/SVC"
     assert a["user"] == "RO" and a["password"] == "segredo-db"
     # O schema é de cada cliente: só o `a` aponta a sessão.

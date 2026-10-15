@@ -522,8 +522,9 @@ def _oracle_pool():
     """
     global _instantclient_pronto
     cliente = active_client()
-    chave = (cliente.host, cliente.port, cliente.service_name or cliente.sid,
-             cliente.user, cliente.schema)
+    # O modo de endereçamento entra na chave: SID e service name de mesmo texto são destinos distintos
+    destino = ("service", cliente.service_name) if cliente.service_name else ("sid", cliente.sid)
+    chave = (cliente.host, cliente.port, destino, cliente.user, cliente.schema)
     with _pools_lock:
         if chave not in _pools:
             import oracledb
