@@ -4,7 +4,7 @@
 
 Servidor MCP (Model Context Protocol) que conecta o Claude Code e/ou o Codex CLI ao banco do Sankhya ERP, permitindo explorar tabelas, campos, índices, relacionamentos e executar queries SQL diretamente durante uma conversa.
 
-Dois modos de acesso, escolhidos por `SANKHYA_MODE` (**obrigatório**): `direct` conecta no banco pelo driver; `dbe` consulta pelo DB Explorer do próprio Sankhya, para quando só a porta HTTP da aplicação é alcançável. Um mesmo servidor atende **vários clientes**, cada um com o seu banco, cadastrados em `clients.json`. Veja [Escolhendo o modo e o banco](#escolhendo-o-modo-e-o-banco), [Modo DBE](#modo-dbe-sem-conexão-com-o-banco) e [Vários clientes](#vários-clientes).
+Dois modos de acesso: `direct` conecta no banco pelo driver; `dbe` consulta pelo DB Explorer do próprio Sankhya, para quando só a porta HTTP da aplicação é alcançável. O modo é **de cada cliente**: um mesmo servidor atende **vários clientes**, cadastrados em `clients.json`, cada um com o seu `mode` e o seu banco, e mistura os dois à vontade. Sem `clients.json`, `SANKHYA_MODE` (**obrigatório**) define o modo do cliente único montado do `.env`. Veja [Escolhendo o modo e o banco](#escolhendo-o-modo-e-o-banco), [Modo DBE](#modo-dbe-sem-conexão-com-o-banco) e [Vários clientes](#vários-clientes).
 
 Suporta os **dois bancos** distribuídos pela Sankhya no ambiente de desenvolvimento:
 
@@ -151,7 +151,7 @@ pwsh -File setup.ps1 -Cli both     # claude | codex | both
 bash setup.sh --cli both           # claude | codex | both
 ```
 
-Após o setup, configure o `.env` (**`SANKHYA_MODE` é obrigatório**: `direct` ou `dbe`) e, se for atender vários clientes, o `clients.json`. Reinicie o CLI escolhido. Sem `SANKHYA_MODE` o MCP não sobe e diz o que falta.
+Após o setup, configure o `.env` (cliente único; **`SANKHYA_MODE` é obrigatório**: `direct` ou `dbe`) **ou** o `clients.json` (um ou vários clientes, cada um com o seu `mode`). Reinicie o CLI escolhido. Sem `SANKHYA_MODE` (e sem `clients.json`) o MCP não sobe e diz o que falta.
 
 Veja **[INSTALACAO.md](INSTALACAO.md)** para o guia completo passo a passo, configuração de credenciais e solução de problemas.
 
@@ -167,15 +167,15 @@ cp .env.example .env
 
 ### Escolhendo o modo e o banco
 
-Três chaves definem o destino:
+Este trecho vale para o cliente único montado do `.env`. Com `clients.json`, o modo e a conexão são de cada cliente (veja [Vários clientes](#vários-clientes)) e o `.env` não é lido para isso. Três chaves definem o destino:
 
 | Chave | Valores | Default | Para que serve |
 |-------|---------|---------|----------------|
-| `SANKHYA_MODE` | `direct` \| `dbe` | **nenhum, obrigatório** | Como o MCP chega ao banco: `direct` conecta pelo driver; `dbe` consulta pelo DB Explorer do Sankhya (veja [Modo DBE](#modo-dbe-sem-conexão-com-o-banco)) |
+| `SANKHYA_MODE` | `direct` \| `dbe` | **nenhum, obrigatório sem `clients.json`** | Como o MCP chega ao banco: `direct` conecta pelo driver; `dbe` consulta pelo DB Explorer do Sankhya (veja [Modo DBE](#modo-dbe-sem-conexão-com-o-banco)) |
 | `SANKHYA_DB_TYPE` | `oracle` \| `sqlserver` | `oracle` | Escolhe o dialeto, o driver e as queries de catálogo. Vale nos dois modos |
 | `SANKHYA_DB_DATABASE` | nome do database | `jiva` | Só no SQL Server, que endereça database em vez de SID/service name |
 
-`SANKHYA_MODE` não tem padrão: sem ele o servidor falha na subida e diz o que falta. Um padrão tentaria conectar no banco justamente onde só o DB Explorer é alcançável, e o erro viria como "conexão recusada". **Instalações antigas precisam acrescentar `SANKHYA_MODE=direct` ao `.env`.**
+`SANKHYA_MODE` não tem padrão: sem ele (e sem `clients.json`) o servidor falha na subida e diz o que falta. Um padrão tentaria conectar no banco justamente onde só o DB Explorer é alcançável, e o erro viria como "conexão recusada". **Instalações antigas precisam acrescentar `SANKHYA_MODE=direct` ao `.env`.**
 O default de `SANKHYA_DB_TYPE` é `oracle`. Valor desconhecido em qualquer das duas chaves faz o servidor falhar na subida, em vez de conectar no banco errado.
 
 **Oracle** (`.env`):
@@ -210,7 +210,7 @@ Quando só a porta HTTP do Sankhya é alcançável (a do Oracle ou do SQL Server
 
 | Chave | Obrigatória no modo `dbe` | Para que serve |
 |-------|---------------------------|----------------|
-| `SANKHYA_MODE` | sim (`dbe`) | Liga o modo. Obrigatória em qualquer modo, sem padrão |
+| `SANKHYA_MODE` | sim (`dbe`) | Liga o modo. Sem padrão. Com `clients.json`, o modo é a chave `mode` de cada cliente |
 | `SANKHYA_DBE_URL` | sim | Endereço do Sankhya (`http://host:8380`). `/mge` no fim é aceito e ignorado |
 | `SANKHYA_DBE_USER` | sim | Usuário do Sankhya (não é o usuário do banco) |
 | `SANKHYA_DBE_PASSWORD` | sim | Senha do usuário |
@@ -240,36 +240,33 @@ O SQL continua adaptado ao banco: o catálogo (`ALL_TABLES` no Oracle, `INFORMAT
 
 ### Vários clientes
 
-Um mesmo MCP pode atender vários clientes, cada um com o seu banco. O cadastro é o arquivo **`clients.json`** na raiz do projeto e vale **nos dois modos**. Use `clients.example.json` como modelo:
+Um mesmo MCP pode atender vários clientes, cada um com o seu modo e o seu banco. O cadastro é o arquivo **`clients.json`** na raiz do projeto. Use `clients.example.json` como modelo:
 
 ```json
 {
-  "acme": {"descricao": "Acme Ltda", "default": true, "db_type": "oracle",
-           "db_host": "10.0.0.5", "db_service": "XE",
-           "db_user": "usuario_banco", "db_password": "senha_banco",
+  "acme": {"descricao": "Acme Ltda", "mode": "dbe", "default": true, "db_type": "oracle",
            "dbe_url": "http://sankhya.acme.com.br:8380",
            "dbe_user": "usuario_sankhya", "dbe_password": "senha_sankhya"},
-  "beta": {"descricao": "Beta SA", "db_type": "sqlserver", "db_schema": "SANKHYA",
+  "beta": {"descricao": "Beta SA", "mode": "direct", "db_type": "sqlserver", "db_schema": "SANKHYA",
            "db_host": "10.0.0.9", "db_database": "jiva",
-           "db_user": "usuario_banco", "db_password": "senha_banco",
-           "dbe_url": "https://sankhya.beta.com.br",
-           "dbe_user": "usuario_sankhya", "dbe_password": "senha_sankhya"}
+           "db_user": "usuario_banco", "db_password": "senha_banco"}
 }
 ```
 
-**O modo escolhe a credencial.** `SANKHYA_MODE` vale para o processo inteiro e decide qual conjunto de cada cliente é usado: `db_*` no `direct`, `dbe_*` no `dbe`. Só o conjunto do modo em uso é exigido; o outro pode ficar de fora (ou guardado, para quando você trocar o modo). Cliente sem as credenciais do modo derruba a subida, em vez de sumir da lista em silêncio.
+**O modo é de cada cliente.** A chave `mode` (`direct` ou `dbe`) é obrigatória em toda entrada e decide qual conjunto de credenciais dela é usado: `db_*` no `direct`, `dbe_*` no `dbe`. Um mesmo arquivo mistura os dois modos. Só o conjunto do modo da entrada é exigido; o outro pode ficar de fora (ou guardado, para quando você trocar o modo daquele cliente). Cliente sem `mode`, ou sem as credenciais do seu modo, derruba a subida, em vez de sumir da lista em silêncio.
 
 | Chave | Obrigatória | Para que serve |
 |-------|-------------|----------------|
-| `db_host`, `db_user`, `db_password` | no modo `direct` | Banco do cliente. Não há `localhost` implícito aqui: esquecer o host apontaria para a máquina local |
+| `mode` | sempre | `direct` (conecta no banco pelo driver) ou `dbe` (consulta pelo DB Explorer do Sankhya) |
+| `db_host`, `db_user`, `db_password` | se `mode` é `direct` | Banco do cliente. Não há `localhost` implícito aqui: esquecer o host apontaria para a máquina local |
 | `db_port`, `db_service`, `db_service_name`, `db_database` | não | Como no `.env` (porta segue o banco: 1521 ou 1433) |
-| `dbe_url`, `dbe_user`, `dbe_password` | no modo `dbe` | Sankhya do cliente e credencial da aplicação |
+| `dbe_url`, `dbe_user`, `dbe_password` | se `mode` é `dbe` | Sankhya do cliente e credencial da aplicação |
 | `db_type` | não (`oracle`) | O banco do cliente: `oracle` ou `sqlserver`. Pode diferir entre clientes |
 | `db_schema` | não | Schema das tabelas, como `SANKHYA_DB_SCHEMA` |
 | `descricao` | não | Texto mostrado em `list_clients` |
 | `default` | não | `true` marca o cliente usado quando a chamada não informa `client`. **No máximo um**; dois derrubam a subida |
 
-As chaves seguem o nome da variável do `.env` sem o `SANKHYA_` (`db_type` ↔ `SANKHYA_DB_TYPE`). Chave desconhecida (`pasword`, `mode`, `db_hots`) é erro, não é ignorada: o modo é do processo, não do cliente. O nome do cliente não distingue maiúsculas de minúsculas. No modo `direct` cada cliente Oracle tem o seu pool de conexões.
+As chaves seguem o nome da variável do `.env` sem o `SANKHYA_` (`db_type` ↔ `SANKHYA_DB_TYPE`). Chave desconhecida (`pasword`, `db_hots`) é erro, não é ignorada. O nome do cliente não distingue maiúsculas de minúsculas. Cada cliente `direct` Oracle tem o seu pool de conexões.
 
 **Como o cliente é escolhido.** Toda tool de banco recebe o parâmetro `client`; `list_clients` mostra os cadastrados, sem credenciais.
 - `client` informado: vale esse cliente.
@@ -278,7 +275,7 @@ As chaves seguem o nome da variável do `.env` sem o `SANKHYA_` (`db_type` ↔ `
 
 O MCP não pergunta nada sozinho: quem decide é o Claude, a partir do que você disse. As instruções do servidor mandam perguntar quando o cliente não está claro, em vez de adivinhar. Para não ser perguntado toda vez, marque um `default` ou diga o cliente padrão do projeto no `CLAUDE.md`.
 
-**Onde fica o arquivo.** Ordem de busca: `SANKHYA_CLIENTS_FILE` (que precisa existir), depois `clients.json` na raiz do MCP. Para um cadastro por projeto, ponha `SANKHYA_CLIENTS_FILE=/caminho/clients.json` no `.sankhya-mcp.env` do projeto. Sem arquivo, as variáveis `SANKHYA_*` do `.env` valem como um único cliente chamado `default`. Com o arquivo, as variáveis de conexão do `.env` (`SANKHYA_DB_HOST`, `SANKHYA_DBE_URL` etc.) não são usadas; `SANKHYA_MODE` continua obrigatório.
+**Onde fica o arquivo.** Ordem de busca: `SANKHYA_CLIENTS_FILE` (que precisa existir), depois `clients.json` na raiz do MCP. Para um cadastro por projeto, ponha `SANKHYA_CLIENTS_FILE=/caminho/clients.json` no `.sankhya-mcp.env` do projeto. Sem arquivo, as variáveis `SANKHYA_*` do `.env` valem como um único cliente chamado `default`. Com o arquivo, o `.env` não entra para modo nem conexão (`SANKHYA_MODE`, `SANKHYA_DB_HOST`, `SANKHYA_DBE_URL` etc.): tudo vem de cada cliente.
 
 **Credenciais.** O arquivo guarda as senhas em texto puro e está no `.gitignore`: use `chmod 600 clients.json` (o servidor avisa se outros usuários da máquina podem lê-lo). O cadastro é feito só editando o arquivo. Não há tool para cadastrar cliente de propósito: a senha passaria pela conversa e ficaria no histórico.
 

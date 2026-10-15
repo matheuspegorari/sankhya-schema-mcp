@@ -2,15 +2,15 @@
 Clientes do Sankhya Schema MCP.
 
 Um cliente é um destino de consulta: o dialeto do banco, o schema das tabelas e a
-forma de chegar lá. O modo de acesso é global e obrigatório (`SANKHYA_MODE`): `direct` conecta no banco
-pelo driver, `dbe` consulta pelo DB Explorer do Sankhya. O servidor sempre tem ao
-menos um cliente:
+forma de chegar lá. O modo de acesso é de cada cliente: `direct` conecta no banco
+pelo driver, `dbe` consulta pelo DB Explorer do Sankhya, e um mesmo servidor pode
+misturar os dois. O servidor sempre tem ao menos um cliente:
 
-- com `clients.json`: um cliente por entrada do arquivo. O modo escolhe qual
-  credencial de cada entrada vale (`db_*` no `direct`, `dbe_*` no `dbe`). É o único
-  caso com mais de um;
+- com `clients.json`: um cliente por entrada do arquivo, e cada entrada declara o
+  próprio `mode` (obrigatório) e traz as credenciais dele (`db_*` no `direct`,
+  `dbe_*` no `dbe`). É o único caso com mais de um;
 - sem `clients.json`: um cliente só, `default`, montado das variáveis `SANKHYA_*`
-  do `.env`.
+  do `.env`, onde `SANKHYA_MODE` (obrigatório) define o modo.
 
 O cliente da chamada em curso vive num `ContextVar`: cada tool o define na
 entrada, e `query()`, `connect()` e companhia o leem sem receber parâmetro.
@@ -90,9 +90,10 @@ def resolve_schema(value: Optional[str]) -> Optional[str]:
     return schema
 
 
-def resolve_mode(value: Optional[str]) -> str:
+def resolve_mode(value: Optional[str], origem: str = "SANKHYA_MODE") -> str:
     """
-    Normaliza `SANKHYA_MODE`. É obrigatório: não há modo padrão.
+    Normaliza o modo de acesso: `SANKHYA_MODE` no `.env`, `mode` no `clients.json`.
+    É obrigatório: não há modo padrão.
 
     Ausente falha alto, como valor desconhecido. Um padrão tentaria abrir
     conexão com o banco justamente onde só o DB Explorer é alcançável, e o erro
@@ -100,9 +101,9 @@ def resolve_mode(value: Optional[str]) -> str:
     """
     modo = (value or "").strip().lower()
     if not modo:
-        raise ValueError("SANKHYA_MODE é obrigatório: use 'direct' ou 'dbe'.")
+        raise ValueError(f"{origem} é obrigatório: use 'direct' ou 'dbe'.")
     if modo not in _MODES:
-        raise ValueError(f"SANKHYA_MODE inválido: {value!r}. Use 'direct' ou 'dbe'.")
+        raise ValueError(f"{origem} inválido: {value!r}. Use 'direct' ou 'dbe'.")
     return modo
 
 
@@ -121,7 +122,7 @@ class Client:
     """
 
     name: str
-    mode: str = "direct"  # o do processo (SANKHYA_MODE): vale para todos os clientes
+    mode: str = "direct"
     db_type: str = "oracle"
     schema: Optional[str] = None
     descricao: str = ""
@@ -222,11 +223,12 @@ def client_from_env(env=None) -> Client:
 
 # Chaves aceitas em cada entrada. Seguem o nome da variável de ambiente sem o
 # `SANKHYA_` (`db_type` ↔ `SANKHYA_DB_TYPE`), então quem conhece o `.env` já
-# conhece o arquivo. Cada entrada pode trazer os dois conjuntos de credencial
-# (`db_*` e `dbe_*`): o modo do processo escolhe qual vale, e o outro fica
-# guardado para quando o modo mudar. Chave desconhecida é erro, não é ignorada.
+# conhece o arquivo. `mode` é a exceção: só existe no arquivo, e escolhe qual
+# conjunto de credencial vale (`db_*` ou `dbe_*`). Uma entrada pode trazer os dois,
+# e o outro fica guardado para quando ela trocar de modo. Chave desconhecida é
+# erro, não é ignorada.
 _REGISTRY_KEYS = {
-    "descricao", "default", "db_type", "db_schema",
+    "mode", "descricao", "default", "db_type", "db_schema",
     "db_host", "db_port", "db_service", "db_service_name", "db_database",
     "db_user", "db_password",
     "dbe_url", "dbe_user", "dbe_password",
@@ -235,7 +237,7 @@ _REGISTRY_KEYS = {
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
-def _client_from_entry(name: str, entry: dict, modo: str) -> Client:
+def _client_from_entry(name: str, entry: dict) -> Client:
     contexto = f"Cliente {name!r} em clients.json"
     if not _NAME_RE.match(name):
         raise ClientError(
@@ -256,7 +258,12 @@ def _client_from_entry(name: str, entry: dict, modo: str) -> Client:
     def texto(chave: str) -> str:
         return str(entry.get(chave) or "").strip()
 
-    # Só as credenciais do modo em uso são exigidas: o outro conjunto é opcional.
+    try:
+        modo = resolve_mode(entry.get("mode"), "mode")
+    except ValueError as exc:
+        raise ClientError(f"{contexto}: {exc}") from None
+
+    # Só as credenciais do modo da entrada são exigidas: o outro conjunto é opcional.
     obrigatorias = {
         "dbe": ("dbe_url", "dbe_user", "dbe_password"),
         "direct": ("db_host", "db_user", "db_password"),
@@ -294,9 +301,10 @@ def _client_from_entry(name: str, entry: dict, modo: str) -> Client:
         raise ClientError(f"{contexto}: {exc}") from None
 
 
-def parse_registry(data, modo: str) -> dict[str, Client]:
+def parse_registry(data) -> dict[str, Client]:
     """
-    Transforma o conteúdo do `clients.json` em clientes do modo `modo`, validando tudo.
+    Transforma o conteúdo do `clients.json` em clientes, cada um no seu `mode`,
+    validando tudo.
 
     O nome é a chave do objeto; duas chaves iguais em caixa diferente (`Acme` e
     `acme`) seriam o mesmo cliente para quem digita, então são recusadas.
@@ -308,7 +316,7 @@ def parse_registry(data, modo: str) -> dict[str, Client]:
     clientes: dict[str, Client] = {}
     vistos: dict[str, str] = {}
     for nome, entrada in data.items():
-        cliente = _client_from_entry(nome, entrada, modo)
+        cliente = _client_from_entry(nome, entrada)
         if nome.lower() in vistos:
             raise ClientError(
                 f"Clientes {vistos[nome.lower()]!r} e {nome!r} diferem só na caixa: "
@@ -325,7 +333,7 @@ def parse_registry(data, modo: str) -> dict[str, Client]:
     return clientes
 
 
-def load_registry(caminho: Path, modo: str) -> dict[str, Client]:
+def load_registry(caminho: Path) -> dict[str, Client]:
     """Lê e valida o arquivo. JSON quebrado vira erro com o arquivo e a linha."""
     import json
 
@@ -336,7 +344,7 @@ def load_registry(caminho: Path, modo: str) -> dict[str, Client]:
     except ValueError as exc:
         raise ClientError(f"{caminho} não é um JSON válido: {exc}") from None
     _avisa_permissao(caminho)
-    return parse_registry(data, modo)
+    return parse_registry(data)
 
 
 def _avisa_permissao(caminho: Path) -> None:
@@ -364,11 +372,10 @@ def load_clients(env=None) -> dict[str, Client]:
     2. `clients.json` na raiz do projeto;
     3. as variáveis `SANKHYA_*`, como um cliente só chamado `default`.
 
-    O modo (`SANKHYA_MODE`, obrigatório) é lido primeiro: com cadastro, as
-    variáveis de conexão do `.env` não são necessárias e não podem ser exigidas.
+    Com cadastro, o `.env` não é lido para modo nem conexão: cada cliente traz os
+    seus. `SANKHYA_MODE` só é exigido no terceiro caso.
     """
     env = os.environ if env is None else env
-    modo = resolve_mode(env.get("SANKHYA_MODE"))
 
     indicado = (env.get("SANKHYA_CLIENTS_FILE") or "").strip()
     if indicado:
@@ -380,7 +387,7 @@ def load_clients(env=None) -> dict[str, Client]:
     else:
         base = client_from_env(env)
         return {base.name: base}
-    return load_registry(caminho, modo)
+    return load_registry(caminho)
 
 
 CLIENTS: dict[str, Client] = load_clients()

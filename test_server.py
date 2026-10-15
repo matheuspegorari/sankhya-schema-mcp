@@ -18,13 +18,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-# Hermético: o modo e o cadastro de clientes vêm daqui, e não do `.env` nem de um
+# Hermético: o cadastro de clientes (e o modo de cada um) vem daqui, e não do `.env` nem de um
 # `clients.json` que o desenvolvedor tenha na pasta. Precisa vir antes dos imports
 # abaixo: `clients.py` monta o cadastro quando é importado.
-os.environ["SANKHYA_MODE"] = "direct"
 _cadastro_dos_testes = Path(tempfile.mkdtemp()) / "clients.json"
 _cadastro_dos_testes.write_text(
-    '{"default": {"default": true, "db_type": "oracle", "db_host": "localhost",'
+    '{"default": {"mode": "direct", "default": true, "db_type": "oracle", "db_host": "localhost",'
     ' "db_user": "SANKHYA", "db_password": "developer"}}',
     encoding="utf-8",
 )
@@ -1082,14 +1081,23 @@ def test_modo_e_obrigatorio():
         raise AssertionError("modo desconhecido deveria falhar alto")
 
 
-def test_boot_sem_modo_falha_mesmo_com_cadastro():
+def test_boot_com_cadastro_nao_exige_sankhya_mode():
+    # O modo é de cada cliente; SANKHYA_MODE só vale para o cliente montado do .env.
     caminho = _arquivo(_JSON_DOIS_DIRECT)
+    assert list(clients.load_clients({"SANKHYA_CLIENTS_FILE": str(caminho)})) == ["acme", "beta"]
+
+
+def test_boot_sem_cadastro_exige_sankhya_mode():
+    original = clients.DEFAULT_CLIENTS_FILE
+    clients.DEFAULT_CLIENTS_FILE = Path(tempfile.mkdtemp()) / "clients.json"
     try:
-        clients.load_clients({"SANKHYA_CLIENTS_FILE": str(caminho)})
+        clients.load_clients({})
     except ValueError as exc:
         assert "SANKHYA_MODE" in str(exc)
     else:
-        raise AssertionError("sem SANKHYA_MODE o boot deveria falhar")
+        raise AssertionError("sem cadastro e sem SANKHYA_MODE o boot deveria falhar")
+    finally:
+        clients.DEFAULT_CLIENTS_FILE = original
 
 
 def test_cliente_do_ambiente_so_exige_dbe_no_modo_dbe():
@@ -1641,11 +1649,11 @@ def _entrada(**mudancas):
 
 def _tres_clientes(modo="dbe", **por_cliente):
     return clients.parse_registry({
-        "acme": _entrada(descricao="Acme Ltda", **por_cliente.get("acme", {})),
-        "beta": _entrada(dbe_url="http://beta:8380", db_type="sqlserver", db_schema="sankhya",
+        "acme": _entrada(mode=modo, descricao="Acme Ltda", **por_cliente.get("acme", {})),
+        "beta": _entrada(mode=modo, dbe_url="http://beta:8380", db_type="sqlserver", db_schema="sankhya",
                          **por_cliente.get("beta", {})),
-        "gama": _entrada(dbe_url="https://gama", **por_cliente.get("gama", {})),
-    }, modo)
+        "gama": _entrada(mode=modo, dbe_url="https://gama", **por_cliente.get("gama", {})),
+    })
 
 
 @contextmanager
@@ -1671,7 +1679,10 @@ def _recusa(fn, trecho):
 
 
 def _registro(dados, modo="dbe"):
-    return clients.parse_registry(dados, modo)
+    """`modo` vai em cada entrada que não traz o próprio `mode`."""
+    if isinstance(dados, dict):
+        dados = {n: ({"mode": modo, **e} if isinstance(e, dict) else e) for n, e in dados.items()}
+    return clients.parse_registry(dados)
 
 
 def test_cadastro_le_os_clientes_do_modo_dbe():
@@ -1693,6 +1704,30 @@ def test_cadastro_le_os_clientes_do_modo_direct():
     # Porta padrão segue o banco; o que não foi dito segue o padrão do .env.
     assert c["beta"].port == 1433 and c["beta"].database == "erp"
     assert c["beta"].service_name == "X" and c["beta"].password == "segredo-db"
+
+
+def test_cada_cliente_tem_o_proprio_modo():
+    c = clients.parse_registry({
+        "a": _entrada(mode="direct"),
+        "b": _entrada(mode="dbe", default=True),
+    })
+    assert (c["a"].mode, c["b"].mode) == ("direct", "dbe")
+    assert c["a"].rotulo.endswith("direto") and c["b"].rotulo.endswith("DBE")
+    assert c["a"].destino == "10.0.0.5:1521" and c["b"].destino == "http://h:8380"
+
+
+def test_modo_do_cliente_e_obrigatorio_e_validado():
+    sem_modo = _entrada()
+    _recusa(lambda: clients.parse_registry({"a": sem_modo}), "Cliente 'a'")
+    _recusa(lambda: clients.parse_registry({"a": sem_modo}), "mode é obrigatório")
+    _recusa(lambda: _registro({"a": _entrada(mode="dbx")}), "mode inválido")
+
+
+def test_instrucoes_com_modos_misturados_dizem_quais_clientes_sao_dbe():
+    c = clients.parse_registry({"a": _entrada(mode="direct"), "b": _entrada(mode="dbe", default=True)})
+    with _cadastro(c):
+        texto = server._client_instructions()
+    assert "MODO DBE" in texto and "Vale para: `b`" in texto
 
 
 def test_o_modo_escolhe_qual_credencial_vale():
@@ -1735,7 +1770,6 @@ def test_cadastro_direct_nao_assume_localhost():
 def test_cadastro_recusa_chave_desconhecida_em_vez_de_ignorar():
     # `pasword` ignorado deixaria o cliente sem senha só na hora da consulta.
     _recusa(lambda: _registro({"a": _entrada(pasword="x")}), "pasword")
-    _recusa(lambda: _registro({"a": _entrada(mode="direct")}), "mode")  # o modo é do processo
     _recusa(lambda: _registro({"a": _entrada(db_hots="x")}), "db_hots")
 
 
@@ -1793,12 +1827,16 @@ def _arquivo(conteudo, nome="clients.json"):
 
 
 _JSON_DOIS = (
-    '{"acme": {"dbe_url": "http://a:8380", "dbe_user": "u", "dbe_password": "p"},'
-    ' "beta": {"dbe_url": "http://b:8380", "dbe_user": "u", "dbe_password": "p", "default": true}}'
+    '{"acme": {"mode": "dbe", "dbe_url": "http://a:8380", "dbe_user": "u", "dbe_password": "p"},'
+    ' "beta": {"mode": "dbe", "dbe_url": "http://b:8380", "dbe_user": "u", "dbe_password": "p", "default": true}}'
 )
 _JSON_DOIS_DIRECT = (
-    '{"acme": {"db_host": "a", "db_user": "u", "db_password": "p"},'
-    ' "beta": {"db_host": "b", "db_user": "u", "db_password": "p", "default": true}}'
+    '{"acme": {"mode": "direct", "db_host": "a", "db_user": "u", "db_password": "p"},'
+    ' "beta": {"mode": "direct", "db_host": "b", "db_user": "u", "db_password": "p", "default": true}}'
+)
+_JSON_MISTO = (
+    '{"acme": {"mode": "direct", "db_host": "a", "db_user": "u", "db_password": "p"},'
+    ' "beta": {"mode": "dbe", "dbe_url": "http://b:8380", "dbe_user": "u", "dbe_password": "p", "default": true}}'
 )
 _ENV_DBE = {
     "SANKHYA_MODE": "dbe",
@@ -1809,31 +1847,31 @@ _ENV_DBE = {
 _ENV_DIRECT = {"SANKHYA_MODE": "direct", "SANKHYA_DB_HOST": "env-host"}
 
 
-def test_cadastro_vale_nos_dois_modos():
-    dbe_ = clients.load_clients({"SANKHYA_MODE": "dbe", "SANKHYA_CLIENTS_FILE": str(_arquivo(_JSON_DOIS))})
+def test_cadastro_vale_nos_dois_modos_e_mistura_os_dois():
+    dbe_ = clients.load_clients({"SANKHYA_CLIENTS_FILE": str(_arquivo(_JSON_DOIS))})
     assert list(dbe_) == ["acme", "beta"] and dbe_["acme"].mode == "dbe"
     assert dbe_["beta"].default and not dbe_["acme"].default
-    direto = clients.load_clients(
-        {"SANKHYA_MODE": "direct", "SANKHYA_CLIENTS_FILE": str(_arquivo(_JSON_DOIS_DIRECT))}
-    )
+    direto = clients.load_clients({"SANKHYA_CLIENTS_FILE": str(_arquivo(_JSON_DOIS_DIRECT))})
     assert list(direto) == ["acme", "beta"] and direto["acme"].mode == "direct"
     assert direto["beta"].host == "b"
+    misto = clients.load_clients({"SANKHYA_CLIENTS_FILE": str(_arquivo(_JSON_MISTO))})
+    assert (misto["acme"].mode, misto["beta"].mode) == ("direct", "dbe")
 
 
 def test_cadastro_dispensa_as_variaveis_de_conexao_do_env():
     # Regressão: o servidor exigia SANKHYA_DBE_URL/USER/PASSWORD do .env mesmo com
     # clients.json, que traz as credenciais de cada cliente.
     caminho = _arquivo(_JSON_DOIS)
-    resultado = clients.load_clients({"SANKHYA_MODE": "dbe", "SANKHYA_CLIENTS_FILE": str(caminho)})
+    resultado = clients.load_clients({"SANKHYA_CLIENTS_FILE": str(caminho)})
     assert list(resultado) == ["acme", "beta"]
 
 
-def test_arquivo_com_credencial_so_do_outro_modo_derruba_o_boot():
-    # O modo vale para todos: um cliente sem as credenciais dele não ficaria de fora
-    # em silêncio, e sim apareceria como erro de subida.
-    caminho = _arquivo(_JSON_DOIS)
+def test_cliente_sem_as_credenciais_do_proprio_modo_derruba_o_boot():
+    # Um cliente sem as credenciais do seu modo não ficaria de fora em silêncio:
+    # apareceria como erro de subida.
+    caminho = _arquivo(_JSON_DOIS.replace('"mode": "dbe"', '"mode": "direct"'))
     _recusa(
-        lambda: clients.load_clients({"SANKHYA_MODE": "direct", "SANKHYA_CLIENTS_FILE": str(caminho)}),
+        lambda: clients.load_clients({"SANKHYA_CLIENTS_FILE": str(caminho)}),
         "o modo direct exige db_host",
     )
 
