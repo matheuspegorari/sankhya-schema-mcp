@@ -6,19 +6,36 @@ Oracle Instant Client 21c) ou SQL Server (via pymssql).
 O banco é escolhido por `SANKHYA_DB_TYPE` (`oracle` por padrão). Tudo que muda
 de um banco para o outro — queries de catálogo, conexão, transação de leitura,
 plano de execução — vive em `dialects.py`.
+
+`SANKHYA_MODE=dbe` troca a conexão com o banco pelo DB Explorer do Sankhya: o
+login é feito com usuário e senha da aplicação e toda consulta vai por ele
+(ver `dbe.py`). Nesse modo o `clients.json` cadastra vários clientes, cada um com
+o seu Sankhya e o seu banco; cada tool recebe `client` e roda contra aquele
+cliente (ver `clients.py`).
 """
 
+import functools
 import re
-from typing import Optional
+from typing import Annotated, Optional
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
+from clients import (
+    CLIENTS,
+    ClientError,
+    active_client,
+    default_client,
+    is_multi,
+    select_client,
+    use_client,
+)
+from dbe import RowCapError, get_session, inline_params, run as dbe_run
 from dialects import (
     BEGIN_READ_ONLY,
-    DB_CONFIG,
-    DB_TYPE,
     connect,
     explain_plan,
+    group_prefix_counts,
     group_prefixes,
     is_missing_object,
     is_plan_unavailable,
@@ -58,6 +75,10 @@ def fetch_rows(
     (colunas, índices, FKs), onde o volume é limitado pela própria tabela e um
     corte esconderia parte do schema.
 
+    No modo DBE (`SANKHYA_MODE=dbe`) a consulta vai ao DB Explorer, sem conexão com
+    o banco. Lá o teto é do próprio DB Explorer (5000 linhas): com `limit=None`,
+    `truncado` volta True se ele cortou o resultado, e `execute_query` recusa.
+
     A transação é aberta em modo de leitura e sempre desfeita ao final. No Oracle
     isso significa `SET TRANSACTION READ ONLY`, e o próprio banco recusa DML que
     escape da validação de aplicação (ORA-01456). No SQL Server não existe
@@ -69,11 +90,15 @@ def fetch_rows(
     # cortaria o fim do resultado em `rows[:limit]`.
     if limit is not None:
         limit = max(1, limit)
+    cliente = active_client()
+    if cliente.mode == "dbe":
+        sessao = get_session(cliente.dbe_url, cliente.dbe_user, cliente.dbe_password)
+        return dbe_run(sessao, inline_params(sql, params, cliente.db_type), limit)
     with connect() as conn:
         # Garante início de transação limpo antes de marcá-la como somente leitura
         conn.rollback()
         with conn.cursor() as cur:
-            cur.execute(BEGIN_READ_ONLY[DB_TYPE])
+            cur.execute(BEGIN_READ_ONLY[cliente.db_type])
             cur.execute(sql, params or None)
             columns = [col[0].lower() for col in cur.description]
             if limit is None:
@@ -91,8 +116,17 @@ def fetch_rows(
 def execute_query(
     sql: str, params: list = None, limit: Optional[int] = DEFAULT_ROW_LIMIT
 ) -> list[dict]:
-    """Atalho para `fetch_rows` quando o aviso de truncamento não é necessário."""
-    return fetch_rows(sql, params, limit)[0]
+    """
+    Atalho para `fetch_rows` quando o aviso de truncamento não é necessário.
+
+    Sem teto (`limit=None`) o chamador espera o resultado inteiro: se o DB
+    Explorer cortou, levanta `RowCapError` em vez de entregar parte como se fosse
+    tudo. No modo direto `truncado` é sempre False aqui, então nunca levanta.
+    """
+    rows, truncated = fetch_rows(sql, params, limit)
+    if truncated and limit is None:
+        raise RowCapError(rows)
+    return rows
 
 
 def truncation_note(truncated: bool, limit: int = DEFAULT_ROW_LIMIT) -> str:
@@ -346,7 +380,7 @@ def pick_owner(owners: set[str]) -> str:
     Server, e na base `jiva` da Sankhya ele também é `SANKHYA`, convivendo com
     um punhado de tabelas em `dbo`.
     """
-    conectado = (DB_CONFIG["user"] or "").upper()
+    conectado = (active_client().user or "").upper()
     return conectado if conectado in owners else sorted(owners)[0]
 
 
@@ -366,6 +400,31 @@ def dictionary_rows(nome_query: str, *params, **fmt) -> list[dict]:
         if is_missing_object(exc):
             return []
         raise
+
+
+def partial_dictionary_rows(nome_query: str, *params, **fmt) -> tuple[list[dict], bool]:
+    """
+    Como `dictionary_rows`, mas aceita resultado parcial: devolve (linhas, parcial).
+
+    Serve às buscas abertas (`search_*`), onde a descrição é enfeite da resposta
+    e a consulta ao dicionário não tem como ser mais estreita que o termo
+    buscado. No modo DBE um termo como `A` passa das 5000 linhas do DB Explorer;
+    dali sai o que coube e o aviso, em vez de um erro que derruba a busca toda.
+    """
+    try:
+        return dictionary_rows(nome_query, *params, **fmt), False
+    except RowCapError as exc:
+        return exc.rows, True
+
+
+def partial_descriptions_note(parcial: bool) -> str:
+    """Aviso de que a coluna `descricao` ficou incompleta (ver `partial_dictionary_rows`)."""
+    if not parcial:
+        return ""
+    return (
+        "\n\n> ⚠️ Descrições incompletas: o dicionário passou do teto de linhas do DB "
+        "Explorer. Use um termo mais específico para vê-las todas."
+    )
 
 
 def resolve_table_name(name: str) -> tuple[str, list[dict]]:
@@ -480,11 +539,49 @@ def assert_safe_identifier(name: str) -> Optional[str]:
 # devolve None e o servidor sobe igual — ver `updates.py`.
 _AVISO_UPDATE = update_notice()
 
+def _client_instructions() -> str:
+    """
+    O trecho das instruções que depende dos clientes cadastrados. Com um cliente
+    só e conexão direta devolve vazio: o texto fica como sempre foi, sem contexto
+    a mais para quem não usa DBE nem multi-cliente.
+    """
+    clientes = list(CLIENTS.values())
+    texto = ""
+    if any(c.mode == "dbe" for c in clientes):
+        texto += (
+            "MODO DBE: as consultas passam pelo DB Explorer do Sankhya, não por "
+            "conexão com o banco. Só SELECT/WITH, no máximo 5000 linhas por consulta "
+            "e sem EXPLAIN PLAN. A sintaxe continua a do banco por trás"
+            + (" de cada cliente.\n\n" if is_multi() else f" ({clientes[0].db_type}).\n\n")
+        )
+    if is_multi():
+        padrao = default_client()
+        texto += (
+            f"MULTI-CLIENTE: este servidor atende {len(clientes)} clientes, cada um com o "
+            "seu Sankhya e o seu banco: "
+            + ", ".join(f"`{c.name}`" for c in clientes)
+            + ". Toda tool recebe `client`. "
+            + (
+                f"O cliente padrão é `{padrao.name}`, usado quando `client` é omitido. "
+                if padrao
+                else "Não há cliente padrão: `client` é obrigatório. "
+            )
+            + "Se o usuário não disse e o contexto não deixa claro qual cliente, PERGUNTE "
+            "— não adivinhe: as tabelas e o dicionário têm os mesmos nomes em todos, e "
+            "consultar o cliente errado devolve dado de outro cliente sem nenhum erro. "
+            "Use `list_clients` para ver os cadastrados. Toda resposta começa com "
+            "`Cliente: ...`: confira que é o que o usuário pediu.\n\n"
+        )
+    return texto
+
+
 mcp = FastMCP(
     name="sankhya-schema",
     instructions=(
         f"Servidor de exploração do schema do banco do Sankhya ERP "
-        f"(Oracle ou SQL Server, conforme SANKHYA_DB_TYPE). Versão {__version__}.\n\n"
+        f"(Oracle ou SQL Server, conforme {'o cliente' if is_multi() else 'SANKHYA_DB_TYPE'}). "
+        f"Versão {__version__}.\n\n"
+        + _client_instructions()
         + (f"⚠️ ATUALIZAÇÃO DISPONÍVEL: {_AVISO_UPDATE}\n\n" if _AVISO_UPDATE else "")
         +
         "AÇÃO IMEDIATA — LEIA ANTES DE QUALQUER OUTRA DECISÃO:\n"
@@ -527,11 +624,51 @@ mcp = FastMCP(
 
 
 # ---------------------------------------------------------------------------
+# Cliente da chamada
+# ---------------------------------------------------------------------------
+
+# O texto vai no schema de toda tool: curto, porque se repete 11 vezes.
+ClientParam = Annotated[
+    str,
+    Field(description="Cliente cadastrado (ver list_clients). Omita para usar o padrão."),
+]
+
+
+def client_tool(fn):
+    """
+    Roda a tool contra o cliente indicado em `client`.
+
+    Resolve o nome (ou o cliente padrão), torna-o o cliente ativo durante a
+    chamada e, com mais de um cliente cadastrado, abre a resposta dizendo qual foi:
+    é como o usuário percebe a consulta no cliente errado. Cliente inexistente ou
+    ambíguo devolve o erro como resposta — nenhuma consulta é executada.
+
+    A tool declara o parâmetro `client` (é dele que o schema MCP nasce) mas não o
+    lê: o decorator o consome antes.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, client: str = "", **kwargs):
+        try:
+            cliente = select_client(client)
+        except ClientError as exc:
+            return f"❌ {exc}"
+        with use_client(cliente):
+            resposta = fn(*args, **kwargs)
+        if is_multi():
+            return f"> **Cliente:** {cliente.rotulo}\n\n{resposta}"
+        return resposta
+
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def describe_table(table_name: str) -> str:
+@client_tool
+def describe_table(table_name: str, client: ClientParam = "") -> str:
     """
     Retorna todas as colunas de uma tabela Sankhya com a descrição em português
     do dicionário e, para os campos enumerados, TODOS os valores aceitos com o
@@ -604,7 +741,8 @@ def describe_table(table_name: str) -> str:
 
 
 @mcp.tool()
-def search_tables(keyword: str) -> str:
+@client_tool
+def search_tables(keyword: str, client: ClientParam = "") -> str:
     """
     Busca tabelas cujo nome contenha o termo informado.
     Útil para descobrir tabelas relacionadas a um módulo.
@@ -619,15 +757,17 @@ def search_tables(keyword: str) -> str:
     """
     padrao = f"%{keyword.upper()}%"
     rows, truncated = fetch_rows(query("tables"), [padrao])
-    descricoes = dictionary_rows("table_descriptions", padrao)
+    descricoes, parcial = partial_dictionary_rows("table_descriptions", padrao)
     return (
         rows_to_markdown(merge_table_descriptions(rows, descricoes))
         + truncation_note(truncated)
+        + partial_descriptions_note(parcial)
     )
 
 
 @mcp.tool()
-def search_columns(column_keyword: str, table_keyword: str = "") -> str:
+@client_tool
+def search_columns(column_keyword: str, table_keyword: str = "", client: ClientParam = "") -> str:
     """
     Busca em quais tabelas existe um campo com o nome informado.
     Permite filtrar por prefixo de tabela.
@@ -649,15 +789,19 @@ def search_columns(column_keyword: str, table_keyword: str = "") -> str:
 
     # O dicionário não tem alias de tabela: o filtro opcional usa a coluna crua.
     filtro_dic = "AND NOMETAB LIKE {p2}" if table_keyword else ""
-    descricoes = dictionary_rows("column_descriptions", *params, filtro=filtro_dic)
+    descricoes, parcial = partial_dictionary_rows(
+        "column_descriptions", *params, filtro=filtro_dic
+    )
     return (
         rows_to_markdown(merge_column_descriptions(rows, descricoes))
         + truncation_note(truncated)
+        + partial_descriptions_note(parcial)
     )
 
 
 @mcp.tool()
-def get_foreign_keys(table_name: str) -> str:
+@client_tool
+def get_foreign_keys(table_name: str, client: ClientParam = "") -> str:
     """
     Retorna as foreign keys de uma tabela: qual coluna local aponta
     para qual tabela/coluna de destino.
@@ -693,7 +837,8 @@ def get_foreign_keys(table_name: str) -> str:
 
 
 @mcp.tool()
-def get_indexes(table_name: str) -> str:
+@client_tool
+def get_indexes(table_name: str, client: ClientParam = "") -> str:
     """
     Lista os índices de uma tabela e suas colunas.
     Útil para otimizar queries e entender chaves de busca.
@@ -713,7 +858,34 @@ def get_indexes(table_name: str) -> str:
 
 
 @mcp.tool()
-def run_query(sql: str, limit: int = 50) -> str:
+@client_tool
+def get_triggers(table_name: str, client: ClientParam = "") -> str:
+    """
+    Lista as triggers de uma tabela: nome, momento, evento e se estão ativas.
+    Aceita tanto o nome da tabela no banco quanto o EntityName (NOMEINSTANCIA).
+
+    Útil para saber o que dispara ao gravar numa tabela antes de mexer nela —
+    base Sankhya customizada costuma ter dezenas em TGFCAB.
+
+    O vocabulário segue o banco: no Oracle o momento é `BEFORE EACH ROW` /
+    `AFTER STATEMENT`, no SQL Server é `AFTER` / `INSTEAD OF`.
+
+    Exemplos:
+      get_triggers("TGFCAB")
+      get_triggers("CabecalhoNota")
+    """
+    resolved, entity_rows = resolve_table_name(table_name)
+    rows = execute_query(query("triggers"), [resolved], limit=None)
+    if not rows:
+        return unresolved_name_note(table_name, entity_rows) or (
+            f"Nenhuma trigger encontrada para `{resolved}`."
+        )
+    return f"## Triggers — {resolved}\n\n{rows_to_markdown(rows)}\n\n_{len(rows)} trigger(s)._"
+
+
+@mcp.tool()
+@client_tool
+def run_query(sql: str, limit: int = 50, client: ClientParam = "") -> str:
     """
     Executa uma query SELECT na base Sankhya local e retorna até
     `limit` linhas formatadas como tabela Markdown.
@@ -743,8 +915,29 @@ def run_query(sql: str, limit: int = 50) -> str:
         return f"❌ Erro ao executar query:\n```\n{str(e)}\n```"
 
 
+def validate_query_dbe(sql: str) -> str:
+    """
+    Validação no modo DBE. O DB Explorer só executa SELECT/WITH: não há EXPLAIN
+    PLAN nem SHOWPLAN, então a query é executada de fato e o resultado descartado.
+
+    É a única forma de o banco dizer se tabela e coluna existem. Fica explícito na
+    resposta, porque `validate_query` promete não executar nada nos outros modos —
+    e uma consulta pesada roda inteira (o DB Explorer devolve até 5000 linhas).
+    """
+    try:
+        fetch_rows(sql, limit=1)
+    except Exception as e:
+        return f"❌ Query inválida:\n```\n{str(e)}\n```"
+    return (
+        "✅ Query válida.\n\n"
+        "_Modo DBE: o DB Explorer não gera plano de execução, então a query foi "
+        "executada (somente leitura) e o resultado descartado._"
+    )
+
+
 @mcp.tool()
-def validate_query(sql: str) -> str:
+@client_tool
+def validate_query(sql: str, client: ClientParam = "") -> str:
     """
     Valida a sintaxe de uma query sem executá-la de fato.
     Checa erros de sintaxe, tabelas inexistentes e colunas inválidas pelo
@@ -755,6 +948,9 @@ def validate_query(sql: str) -> str:
     erro = assert_read_only_query(sql)
     if erro:
         return f"❌ {erro}"
+
+    if active_client().mode == "dbe":
+        return validate_query_dbe(sql)
 
     try:
         rows = explain_plan(sql)
@@ -775,7 +971,8 @@ def validate_query(sql: str) -> str:
 
 
 @mcp.tool()
-def table_sample(table_name: str, limit: int = 10, columns: str = "") -> str:
+@client_tool
+def table_sample(table_name: str, limit: int = 10, columns: str = "", client: ClientParam = "") -> str:
     """
     Retorna uma amostra de dados reais de uma tabela.
     Útil para entender o conteúdo e o formato dos campos.
@@ -851,7 +1048,8 @@ def table_sample(table_name: str, limit: int = 10, columns: str = "") -> str:
 
 
 @mcp.tool()
-def search_entities(keyword: str, only_root: bool = False) -> str:
+@client_tool
+def search_entities(keyword: str, only_root: bool = False, client: ClientParam = "") -> str:
     """
     Busca instâncias (EntityNames) do Sankhya por nome ou descrição.
     Útil para descobrir qual EntityName ou tabela corresponde a um conceito de negócio.
@@ -892,7 +1090,8 @@ def search_entities(keyword: str, only_root: bool = False) -> str:
 
 
 @mcp.tool()
-def list_modules() -> str:
+@client_tool
+def list_modules(client: ClientParam = "") -> str:
     """
     Lista os módulos do Sankhya agrupando as tabelas pelo prefixo de
     3 caracteres do nome (TGFCAB, TGFITE e TGFPAR contam para TGF), com a
@@ -901,9 +1100,36 @@ def list_modules() -> str:
     Retorna uma visão geral dos módulos disponíveis no schema. Prefixo com uma
     tabela só fica de fora. Tabelas customizadas aparecem sob `AD_`.
     """
-    rows = execute_query(query("table_names"), limit=None)
-    modulos = group_prefixes([r["table_name"] for r in rows])
+    if active_client().mode == "dbe":
+        # O DB Explorer corta em 5000 linhas e a lista de nomes passa disso
+        # (9.203 numa base medida): o banco conta e só a contagem trafega.
+        modulos = group_prefix_counts(execute_query(query("table_prefixes"), limit=None))
+    else:
+        rows = execute_query(query("table_names"), limit=None)
+        modulos = group_prefixes([r["table_name"] for r in rows])
     return f"## Módulos do Schema Sankhya\n\n{rows_to_markdown(modulos)}"
+
+
+@mcp.tool()
+def list_clients() -> str:
+    """
+    Lista os clientes cadastrados: nome, descrição, banco, tipo de acesso e para
+    onde apontam. O padrão, quando há, é o usado se `client` for omitido.
+    Nunca mostra usuário nem senha.
+    """
+    padrao = default_client()
+    linhas = [
+        {
+            "cliente": c.name,
+            "padrao": "sim" if padrao and c.name == padrao.name else "",
+            "descricao": c.descricao,
+            "banco": "Oracle" if c.db_type == "oracle" else "SQL Server",
+            "acesso": "DBE" if c.mode == "dbe" else "direto",
+            "destino": c.destino,
+        }
+        for c in CLIENTS.values()
+    ]
+    return f"## Clientes\n\n{rows_to_markdown(linhas)}"
 
 
 @mcp.tool()
