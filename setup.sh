@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # URL base do repositório e do instantclient Linux no GitHub Releases
-REPO_URL="https://github.com/frshaka/sankhya-schema-mcp.git"
+REPO_URL="https://github.com/matheuspegorari/sankhya-schema-mcp.git"
 INSTANTCLIENT_URL="https://github.com/frshaka/sankhya-schema-mcp/releases/download/v1.1/instantclient-linux.zip"
 
 set -e
@@ -336,7 +336,7 @@ fi
 
 echo ""
 echo "=== Instalação concluída! ==="
-echo "Próximo passo: edite as credenciais em .env (use .env.example como modelo)."
+echo "Próximo passo: edite o .env (use .env.example como modelo). SANKHYA_MODE é obrigatório: direct ou dbe."
 if [ "$INSTALL_CLAUDE" = "1" ]; then
     echo "Claude Code: reinicie e rode /mcp para confirmar. As tools foram liberadas automaticamente."
 fi

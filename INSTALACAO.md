@@ -66,7 +66,7 @@ Este guia cobre a instalação completa do servidor MCP que conecta o Claude Cod
 Abra o PowerShell 7 (pwsh) e execute:
 
 ```powershell
-git clone https://github.com/frshaka/sankhya-schema-mcp.git
+git clone https://github.com/matheuspegorari/sankhya-schema-mcp.git
 cd sankhya-schema-mcp
 ```
 
@@ -180,7 +180,7 @@ sudo yum install -y libaio
 ### Passo 2 — Clonar o repositório
 
 ```bash
-git clone https://github.com/frshaka/sankhya-schema-mcp.git
+git clone https://github.com/matheuspegorari/sankhya-schema-mcp.git
 cd sankhya-schema-mcp
 ```
 

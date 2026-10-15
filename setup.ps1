@@ -4,7 +4,7 @@ param(
 )
 
 # URL do repositorio e do instantclient no GitHub Releases
-$RepoUrl          = "https://github.com/frshaka/sankhya-schema-mcp.git"
+$RepoUrl          = "https://github.com/matheuspegorari/sankhya-schema-mcp.git"
 $InstantClientUrl = "https://github.com/frshaka/sankhya-schema-mcp/releases/download/v1.1/instantclient.zip"
 
 Write-Host "=== Setup Sankhya Schema MCP ===" -ForegroundColor Cyan
@@ -288,7 +288,7 @@ args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "$StartScriptToml"]
 
 Write-Host ""
 Write-Host "=== Instalacao concluida! ===" -ForegroundColor Cyan
-Write-Host "Proximo passo: edite as credenciais em .env (use .env.example como modelo)."
+Write-Host "Proximo passo: edite o .env (use .env.example como modelo). SANKHYA_MODE e obrigatorio: direct ou dbe."
 if ($InstallClaude) {
     Write-Host "Claude Code: reinicie e rode /mcp para confirmar. As tools foram liberadas automaticamente."
 }

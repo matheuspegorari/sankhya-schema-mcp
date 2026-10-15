@@ -1,8 +1,10 @@
 # Sankhya Schema MCP
 
-[![release](https://img.shields.io/github/v/release/frshaka/sankhya-schema-mcp?label=release&color=blue)](https://github.com/frshaka/sankhya-schema-mcp/releases/latest)
+[![release](https://img.shields.io/github/v/release/matheuspegorari/sankhya-schema-mcp?label=release&color=blue)](https://github.com/matheuspegorari/sankhya-schema-mcp/releases/latest)
 
 Servidor MCP (Model Context Protocol) que conecta o Claude Code e/ou o Codex CLI ao banco do Sankhya ERP, permitindo explorar tabelas, campos, índices, relacionamentos e executar queries SQL diretamente durante uma conversa.
+
+Dois modos de acesso, escolhidos por `SANKHYA_MODE` (**obrigatório**): `direct` conecta no banco pelo driver; `dbe` consulta pelo DB Explorer do próprio Sankhya, para quando só a porta HTTP da aplicação é alcançável. Um mesmo servidor atende **vários clientes**, cada um com o seu banco, cadastrados em `clients.json`. Veja [Escolhendo o modo e o banco](#escolhendo-o-modo-e-o-banco), [Modo DBE](#modo-dbe-sem-conexão-com-o-banco) e [Vários clientes](#vários-clientes).
 
 Suporta os **dois bancos** distribuídos pela Sankhya no ambiente de desenvolvimento:
 
@@ -11,7 +13,7 @@ Suporta os **dois bancos** distribuídos pela Sankhya no ambiente de desenvolvim
 | Oracle (padrão) | `oracledb` em modo **thick** (Instant Client 21c, compatível com Oracle 11.2+) | `sankhyaimages/skdev-oracle:1.1.0` | 1521 | SID `XE` |
 | SQL Server | `pymssql` (wheel com FreeTDS embutido — não exige driver de sistema operacional) | `sankhyaimages/skdev-mssql:1.1.0` | 1433 | database `jiva` |
 
-A escolha é feita por `SANKHYA_DB_TYPE` no `.env` — veja [Configuração do banco](#configuração-do-banco).
+O banco é escolhido por `SANKHYA_DB_TYPE` (no `.env` ou, por cliente, no `clients.json`) — veja [Configuração do banco](#configuração-do-banco).
 
 ---
 
@@ -28,7 +30,7 @@ A escolha é feita por `SANKHYA_DB_TYPE` no `.env` — veja [Configuração do b
 | `run_query` | Executa SELECT e retorna resultado formatado (somente leitura) |
 | `list_clients` | Clientes cadastrados no `clients.json`, sem credenciais |
 | `get_triggers` | Triggers de uma tabela: momento, evento e se estão ativas (no vocabulário de cada banco) |
-| `validate_query` | Valida sintaxe SQL sem executar (EXPLAIN PLAN no Oracle, SHOWPLAN_ALL no SQL Server) |
+| `validate_query` | Valida sintaxe SQL sem executar (EXPLAIN PLAN no Oracle, SHOWPLAN_ALL no SQL Server). No modo DBE não há plano: a query é executada (somente leitura) e o resultado descartado |
 | `table_sample` | Amostra de dados reais, **com o rótulo ao lado do código** (`L (Liberada)`) |
 | `list_modules` | Visão geral dos módulos Sankhya por prefixo de tabela |
 | `check_updates` | Diz se há versão mais nova publicada e o que mudou |
@@ -117,7 +119,7 @@ sudo apt-get install -y curl unzip libaio1
 ### Windows
 
 ```powershell
-git clone https://github.com/frshaka/sankhya-schema-mcp.git
+git clone https://github.com/matheuspegorari/sankhya-schema-mcp.git
 cd sankhya-schema-mcp
 pwsh -File setup.ps1
 ```
@@ -125,7 +127,7 @@ pwsh -File setup.ps1
 ### Linux
 
 ```bash
-git clone https://github.com/frshaka/sankhya-schema-mcp.git
+git clone https://github.com/matheuspegorari/sankhya-schema-mcp.git
 cd sankhya-schema-mcp
 bash setup.sh
 ```
@@ -149,7 +151,7 @@ pwsh -File setup.ps1 -Cli both     # claude | codex | both
 bash setup.sh --cli both           # claude | codex | both
 ```
 
-Após o setup, configure as credenciais do banco no arquivo `.env` e reinicie o CLI escolhido.
+Após o setup, configure o `.env` (**`SANKHYA_MODE` é obrigatório**: `direct` ou `dbe`) e, se for atender vários clientes, o `clients.json`. Reinicie o CLI escolhido. Sem `SANKHYA_MODE` o MCP não sobe e diz o que falta.
 
 Veja **[INSTALACAO.md](INSTALACAO.md)** para o guia completo passo a passo, configuração de credenciais e solução de problemas.
 

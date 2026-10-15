@@ -614,7 +614,8 @@ mcp = FastMCP(
         "PROIBIÇÕES:\n"
         "- Só delegue tarefas que dependem deste MCP para subagents cuja definição inclua "
         "as tools `mcp__sankhya-schema__*`. Na dúvida, resolva no agente principal.\n"
-        "- NUNCA tente conexão direta ao banco.\n"
+        "- NUNCA tente chegar ao banco por fora deste MCP (driver, sqlplus, script, "
+        "outra ferramenta): use só as tools daqui.\n"
         "- NUNCA invente, chute ou assuma credenciais.\n"
         "- NUNCA use listMcpResources para tentar acessar este servidor. Use as tools diretamente: "
         "search_tables, describe_table, etc.\n"
@@ -887,8 +888,8 @@ def get_triggers(table_name: str, client: ClientParam = "") -> str:
 @client_tool
 def run_query(sql: str, limit: int = 50, client: ClientParam = "") -> str:
     """
-    Executa uma query SELECT na base Sankhya local e retorna até
-    `limit` linhas formatadas como tabela Markdown.
+    Executa uma query SELECT no banco do cliente e retorna até `limit` linhas
+    formatadas como tabela Markdown.
 
     ATENÇÃO: Apenas SELECT é permitido. Queries de escrita serão bloqueadas.
 
@@ -942,6 +943,9 @@ def validate_query(sql: str, client: ClientParam = "") -> str:
     Valida a sintaxe de uma query sem executá-la de fato.
     Checa erros de sintaxe, tabelas inexistentes e colunas inválidas pelo
     plano estimado do banco (EXPLAIN PLAN no Oracle, SHOWPLAN_ALL no SQL Server).
+
+    Exceção: no modo DBE o DB Explorer não gera plano, então a query é executada
+    (somente leitura) e o resultado descartado — a resposta diz quando foi assim.
 
     Exemplo: validate_query("SELECT NUNOTA, CODPARC FROM TGFCAB WHERE CODTIPOPER = 1")
     """
