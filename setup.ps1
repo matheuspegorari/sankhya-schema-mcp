@@ -5,7 +5,7 @@ param(
 
 # URL do repositorio e do instantclient no GitHub Releases
 $RepoUrl          = "https://github.com/matheuspegorari/sankhya-schema-mcp.git"
-$InstantClientUrl = "https://github.com/frshaka/sankhya-schema-mcp/releases/download/v1.1/instantclient.zip"
+$InstantClientUrl = "https://github.com/matheuspegorari/sankhya-schema-mcp/releases/download/instantclient-21c/instantclient.zip"
 
 Write-Host "=== Setup Sankhya Schema MCP ===" -ForegroundColor Cyan
 Write-Host ""
