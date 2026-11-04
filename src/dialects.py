@@ -571,7 +571,7 @@ def connect():
     cliente = active_client()
     if cliente.mode != "direct":
         raise RuntimeError(
-            f"O cliente `{cliente.name}` é DBE: não há conexão direta com o banco."
+            f"O cliente `{cliente.name}` não é direto (modo {cliente.mode}): não há conexão direta com o banco."
         )
     if cliente.db_type == "sqlserver":
         try:

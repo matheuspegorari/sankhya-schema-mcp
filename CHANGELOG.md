@@ -10,6 +10,22 @@ A tool `check_updates` do próprio servidor compara a versão instalada com a
 de cada release no GitHub** são geradas a partir da seção correspondente deste
 arquivo. Uma seção vazia reprova a publicação.
 
+## [2.2.0] - 2026-11-04
+
+### Adicionado
+
+- **Modo API** (`"mode": "api"` no `clients.json`): consulta o DB Explorer pelo
+  gateway oficial `api.sankhya.com.br`, para clientes que bloquearam o
+  `MobileLoginSP.login` do DBE. A entrada traz só `api_token`; AppKey, usuário e
+  senha do gateway (credencial da Vidya) vêm de `SANKHYA_API_APPKEY`,
+  `SANKHYA_API_USER` e `SANKHYA_API_PASSWORD`, conferidas na primeira consulta.
+  O login (`POST /login`) devolve um bearer, refeito uma vez quando o gateway
+  responde 401. Mesmos limites do DBE: só SELECT/WITH, 5000 linhas, sem EXPLAIN
+  PLAN. `SANKHYA_MODE=api` no `.env` não existe: o token é por cliente.
+  Ao encerrar o servidor, cada sessão aberta no gateway faz logout
+  (`MobileLoginSP.logout`, via `atexit`); se o processo for morto à força, a
+  sessão expira sozinha em 30 minutos de inatividade.
+
 ## [2.1.0] - 2026-10-15
 
 ### Alterado

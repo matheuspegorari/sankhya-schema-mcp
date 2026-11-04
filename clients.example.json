@@ -26,5 +26,11 @@
     "dbe_url": "https://sankhya.beta.com.br",
     "dbe_user": "usuario_sankhya",
     "dbe_password": "senha_sankhya"
+  },
+  "gama": {
+    "descricao": "Gama SA (gateway oficial)",
+    "mode": "api",
+    "db_type": "oracle",
+    "api_token": "token_do_cliente_no_gateway"
   }
 }

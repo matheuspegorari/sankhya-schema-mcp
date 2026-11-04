@@ -350,7 +350,7 @@ As credenciais ficam no arquivo `.env` na raiz do projeto. Este arquivo **não �
 
 | Variável | Descrição | Valor padrão |
 |----------|-----------|--------------|
-| `SANKHYA_MODE` | Como o MCP chega ao banco: `direct` (conecta pelo driver) ou `dbe` (consulta pelo DB Explorer do Sankhya). **Obrigatória sem `clients.json`**; com ele, o modo é a chave `mode` de cada cliente | _(nenhum)_ |
+| `SANKHYA_MODE` | Como o MCP chega ao banco: `direct` (conecta pelo driver) ou `dbe` (consulta pelo DB Explorer do Sankhya) ou `api` (o mesmo DB Explorer pelo gateway `api.sankhya.com.br`, só via `clients.json`, com `api_token` por cliente e `SANKHYA_API_APPKEY`/`SANKHYA_API_USER`/`SANKHYA_API_PASSWORD` no `.env`). **Obrigatória sem `clients.json`**; com ele, o modo é a chave `mode` de cada cliente | _(nenhum)_ |
 | `SANKHYA_DB_HOST` | IP ou hostname do servidor Oracle | `localhost` |
 | `SANKHYA_DB_PORT` | Porta do listener Oracle | `1521` |
 | `SANKHYA_DB_SERVICE` | SID do banco | `XE` |

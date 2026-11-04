@@ -253,14 +253,15 @@ Um mesmo MCP pode atender vários clientes, cada um com o seu modo e o seu banco
 }
 ```
 
-**O modo é de cada cliente.** A chave `mode` (`direct` ou `dbe`) é obrigatória em toda entrada e decide qual conjunto de credenciais dela é usado: `db_*` no `direct`, `dbe_*` no `dbe`. Um mesmo arquivo mistura os dois modos. Só o conjunto do modo da entrada é exigido; o outro pode ficar de fora (ou guardado, para quando você trocar o modo daquele cliente). Cliente sem `mode`, ou sem as credenciais do seu modo, derruba a subida, em vez de sumir da lista em silêncio.
+**O modo é de cada cliente.** A chave `mode` (`direct`, `dbe` ou `api`) é obrigatória em toda entrada e decide qual conjunto de credenciais dela é usado: `db_*` no `direct`, `dbe_*` no `dbe`, `api_token` no `api`. Um mesmo arquivo mistura os três modos. Só o conjunto do modo da entrada é exigido; o outro pode ficar de fora (ou guardado, para quando você trocar o modo daquele cliente). Cliente sem `mode`, ou sem as credenciais do seu modo, derruba a subida, em vez de sumir da lista em silêncio.
 
 | Chave | Obrigatória | Para que serve |
 |-------|-------------|----------------|
-| `mode` | sempre | `direct` (conecta no banco pelo driver) ou `dbe` (consulta pelo DB Explorer do Sankhya) |
+| `mode` | sempre | `direct` (conecta no banco pelo driver), `dbe` (consulta pelo DB Explorer do Sankhya do cliente) ou `api` (o mesmo DB Explorer, pelo gateway oficial `api.sankhya.com.br`; use quando o cliente bloqueou o login do DBE) |
 | `db_host`, `db_user`, `db_password` | se `mode` é `direct` | Banco do cliente. Não há `localhost` implícito aqui: esquecer o host apontaria para a máquina local |
 | `db_port`, `db_service`, `db_service_name`, `db_database` | não | Como no `.env` (porta segue o banco: 1521 ou 1433) |
 | `dbe_url`, `dbe_user`, `dbe_password` | se `mode` é `dbe` | Sankhya do cliente e credencial da aplicação |
+| `api_token` | se `mode` é `api` | Token do cliente no gateway. A credencial da Vidya no gateway (AppKey, usuário e senha) é a mesma para todos e vai no `.env`: `SANKHYA_API_APPKEY`, `SANKHYA_API_USER`, `SANKHYA_API_PASSWORD` (exigidas na primeira consulta de um cliente `api`). Ao encerrar o servidor, a sessão no gateway é encerrada (`MobileLoginSP.logout`, melhor esforço). Mesmos limites do DBE: só SELECT/WITH, 5000 linhas, sem EXPLAIN PLAN. O modo `api` só existe via `clients.json` |
 | `db_type` | não (`oracle`) | O banco do cliente: `oracle` ou `sqlserver`. Pode diferir entre clientes |
 | `db_schema` | não | Schema das tabelas, como `SANKHYA_DB_SCHEMA` |
 | `descricao` | não | Texto mostrado em `list_clients` |

@@ -3,12 +3,13 @@ Clientes do Sankhya Schema MCP.
 
 Um cliente é um destino de consulta: o dialeto do banco, o schema das tabelas e a
 forma de chegar lá. O modo de acesso é de cada cliente: `direct` conecta no banco
-pelo driver, `dbe` consulta pelo DB Explorer do Sankhya, e um mesmo servidor pode
-misturar os dois. O servidor sempre tem ao menos um cliente:
+pelo driver, `dbe` consulta pelo DB Explorer do próprio Sankhya do cliente, `api`
+consulta o mesmo DB Explorer pelo gateway oficial (api.sankhya.com.br), e um mesmo
+servidor pode misturar os três. O servidor sempre tem ao menos um cliente:
 
 - com `clients.json`: um cliente por entrada do arquivo, e cada entrada declara o
   próprio `mode` (obrigatório) e traz as credenciais dele (`db_*` no `direct`,
-  `dbe_*` no `dbe`). É o único caso com mais de um;
+  `dbe_*` no `dbe`, `api_token` no `api`). É o único caso com mais de um;
 - sem `clients.json`: um cliente só, `default`, montado das variáveis `SANKHYA_*`
   do `.env`, onde `SANKHYA_MODE` (obrigatório) define o modo.
 
@@ -37,7 +38,7 @@ from dbe import normalize_url
 load_dotenv()
 
 DB_TYPES = ("oracle", "sqlserver")
-_MODES = ("direct", "dbe")
+_MODES = ("direct", "dbe", "api")
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_CLIENTS_FILE = PROJECT_ROOT / "clients.json"
@@ -101,9 +102,9 @@ def resolve_mode(value: Optional[str], origem: str = "SANKHYA_MODE") -> str:
     """
     modo = (value or "").strip().lower()
     if not modo:
-        raise ValueError(f"{origem} é obrigatório: use 'direct' ou 'dbe'.")
+        raise ValueError(f"{origem} é obrigatório: use 'direct', 'dbe' ou 'api'.")
     if modo not in _MODES:
-        raise ValueError(f"{origem} inválido: {value!r}. Use 'direct' ou 'dbe'.")
+        raise ValueError(f"{origem} inválido: {value!r}. Use 'direct', 'dbe' ou 'api'.")
     return modo
 
 
@@ -144,18 +145,29 @@ class Client:
     dbe_user: str = ""
     dbe_password: str = field(default="", repr=False)
 
+    # Gateway oficial (usado quando `mode == "api"`): o token do cliente no gateway.
+    # AppKey, usuário e senha do gateway são da Vidya, não do cliente: ficam no `.env`.
+    api_token: str = field(default="", repr=False)
+
+    @property
+    def via_dbexplorer(self) -> bool:
+        """`dbe` e `api` consultam pelo DB Explorer: mesmos limites, sem conexão com o banco."""
+        return self.mode in ("dbe", "api")
+
     @property
     def rotulo(self) -> str:
         """`acme · Oracle · DBE` — o que vai no cabeçalho das respostas."""
         banco = "Oracle" if self.db_type == "oracle" else "SQL Server"
-        acesso = "DBE" if self.mode == "dbe" else "direto"
+        acesso = {"dbe": "DBE", "api": "API"}.get(self.mode, "direto")
         return f"{self.name} · {banco} · {acesso}"
 
     @property
     def destino(self) -> str:
-        """Onde o cliente aponta, sem credencial: URL do Sankhya ou host do banco."""
+        """Onde o cliente aponta, sem credencial: URL do Sankhya, gateway ou host do banco."""
         if self.mode == "dbe":
             return self.dbe_url
+        if self.mode == "api":
+            return "api.sankhya.com.br"
         return f"{self.host}:{self.port}"
 
 
@@ -174,6 +186,9 @@ def client_from_env(env=None) -> Client:
     """
     env = os.environ if env is None else env
     modo = resolve_mode(env.get("SANKHYA_MODE"))
+    if modo == "api":
+        # O token é de cada cliente; um cliente só vindo do `.env` não tem onde guardá-lo.
+        raise ValueError("SANKHYA_MODE=api não existe: o modo api só funciona via clients.json.")
     tipo = resolve_db_type(env.get("SANKHYA_DB_TYPE"))
     try:
         porta = int(env.get("SANKHYA_DB_PORT") or ("1433" if tipo == "sqlserver" else "1521"))
@@ -224,7 +239,7 @@ def client_from_env(env=None) -> Client:
 # Chaves aceitas em cada entrada. Seguem o nome da variável de ambiente sem o
 # `SANKHYA_` (`db_type` ↔ `SANKHYA_DB_TYPE`), então quem conhece o `.env` já
 # conhece o arquivo. `mode` é a exceção: só existe no arquivo, e escolhe qual
-# conjunto de credencial vale (`db_*` ou `dbe_*`). Uma entrada pode trazer os dois,
+# conjunto de credencial vale (`db_*`, `dbe_*` ou `api_token`). Uma entrada pode trazer os dois,
 # e o outro fica guardado para quando ela trocar de modo. Chave desconhecida é
 # erro, não é ignorada.
 _REGISTRY_KEYS = {
@@ -232,6 +247,7 @@ _REGISTRY_KEYS = {
     "db_host", "db_port", "db_service", "db_service_name", "db_database",
     "db_user", "db_password",
     "dbe_url", "dbe_user", "dbe_password",
+    "api_token",
 }
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -267,6 +283,7 @@ def _client_from_entry(name: str, entry: dict) -> Client:
     obrigatorias = {
         "dbe": ("dbe_url", "dbe_user", "dbe_password"),
         "direct": ("db_host", "db_user", "db_password"),
+        "api": ("api_token",),
     }[modo]
     faltam = [chave for chave in obrigatorias if not texto(chave)]
     if faltam:
@@ -296,6 +313,7 @@ def _client_from_entry(name: str, entry: dict) -> Client:
             dbe_url=normalize_url(texto("dbe_url")),
             dbe_user=texto("dbe_user"),
             dbe_password=str(entry.get("dbe_password") or ""),
+            api_token=texto("api_token"),
         )
     except ValueError as exc:
         raise ClientError(f"{contexto}: {exc}") from None

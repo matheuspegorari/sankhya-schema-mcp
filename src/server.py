@@ -9,9 +9,10 @@ plano de execução — vive em `dialects.py`.
 
 O modo de acesso é de cada cliente: `direct` conecta no banco pelo driver e `dbe`
 troca a conexão pelo DB Explorer do Sankhya: o login é feito com usuário e senha
-da aplicação e toda consulta vai por ele (ver `dbe.py`). O `clients.json`
+da aplicação e toda consulta vai por ele (ver `dbe.py`). `api` consulta o mesmo DB
+Explorer pelo gateway oficial, com token por cliente (ver `api.py`). O `clients.json`
 cadastra vários clientes, cada um com o seu modo, o seu Sankhya e o seu banco, e
-um mesmo servidor mistura os dois; cada tool recebe `client` e roda contra aquele
+um mesmo servidor mistura os três; cada tool recebe `client` e roda contra aquele
 cliente (ver `clients.py`).
 """
 
@@ -31,6 +32,7 @@ from clients import (
     select_client,
     use_client,
 )
+from api import get_api_session
 from dbe import RowCapError, get_session, inline_params, run as dbe_run
 from dialects import (
     BEGIN_READ_ONLY,
@@ -76,7 +78,7 @@ def fetch_rows(
     (colunas, índices, FKs), onde o volume é limitado pela própria tabela e um
     corte esconderia parte do schema.
 
-    Num cliente DBE (`mode: "dbe"`) a consulta vai ao DB Explorer, sem conexão com
+    Num cliente DBE ou API (`mode: "dbe"` ou `"api"`) a consulta vai ao DB Explorer, sem conexão com
     o banco. Lá o teto é do próprio DB Explorer (5000 linhas): com `limit=None`,
     `truncado` volta True se ele cortou o resultado, e `execute_query` recusa.
 
@@ -92,8 +94,12 @@ def fetch_rows(
     if limit is not None:
         limit = max(1, limit)
     cliente = active_client()
-    if cliente.mode == "dbe":
-        sessao = get_session(cliente.dbe_url, cliente.dbe_user, cliente.dbe_password)
+    if cliente.via_dbexplorer:
+        sessao = (
+            get_api_session(cliente.api_token)
+            if cliente.mode == "api"
+            else get_session(cliente.dbe_url, cliente.dbe_user, cliente.dbe_password)
+        )
         return dbe_run(sessao, inline_params(sql, params, cliente.db_type), limit)
     with connect() as conn:
         # Garante início de transação limpo antes de marcá-la como somente leitura
@@ -548,7 +554,7 @@ def _client_instructions() -> str:
     """
     clientes = list(CLIENTS.values())
     texto = ""
-    dbe = [c for c in clientes if c.mode == "dbe"]
+    dbe = [c for c in clientes if c.via_dbexplorer]
     if dbe:
         # Com modos misturados, o modelo precisa saber a quais clientes o limite vale.
         quais = (
@@ -557,7 +563,8 @@ def _client_instructions() -> str:
             else ""
         )
         texto += (
-            "MODO DBE: as consultas passam pelo DB Explorer do Sankhya, não por "
+            "MODO DBE/API: as consultas passam pelo DB Explorer do Sankhya (direto ou "
+            "pelo gateway oficial), não por "
             "conexão com o banco. Só SELECT/WITH, no máximo 5000 linhas por consulta "
             "e sem EXPLAIN PLAN. A sintaxe continua a do banco por trás"
             + (" de cada cliente." if is_multi() else f" ({clientes[0].db_type}).")
@@ -963,7 +970,7 @@ def validate_query(sql: str, client: ClientParam = "") -> str:
     if erro:
         return f"❌ {erro}"
 
-    if active_client().mode == "dbe":
+    if active_client().via_dbexplorer:
         return validate_query_dbe(sql)
 
     try:
@@ -1114,7 +1121,7 @@ def list_modules(client: ClientParam = "") -> str:
     Retorna uma visão geral dos módulos disponíveis no schema. Prefixo com uma
     tabela só fica de fora. Tabelas customizadas aparecem sob `AD_`.
     """
-    if active_client().mode == "dbe":
+    if active_client().via_dbexplorer:
         # O DB Explorer corta em 5000 linhas e a lista de nomes passa disso
         # (9.203 numa base medida): o banco conta e só a contagem trafega.
         modulos = group_prefix_counts(execute_query(query("table_prefixes"), limit=None))
@@ -1138,7 +1145,7 @@ def list_clients() -> str:
             "padrao": "sim" if padrao and c.name == padrao.name else "",
             "descricao": c.descricao,
             "banco": "Oracle" if c.db_type == "oracle" else "SQL Server",
-            "acesso": "DBE" if c.mode == "dbe" else "direto",
+            "acesso": {"dbe": "DBE", "api": "API"}.get(c.mode, "direto"),
             "destino": c.destino,
         }
         for c in CLIENTS.values()

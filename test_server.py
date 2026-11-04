@@ -2092,6 +2092,182 @@ def test_instrucoes_do_modo_direct_com_varios_clientes_nao_falam_de_dbe():
     assert "O cliente padrão é `b`" in texto
 
 
+# --- Modo API (gateway oficial) ----------------------------------------------
+
+import api  # noqa: E402
+
+
+def test_cadastro_api_exige_so_o_token_e_nao_vaza_no_repr():
+    c = _registro({"a": {"api_token": "tok-secreto", "db_type": "sqlserver"}}, "api")["a"]
+    assert c.mode == "api" and c.via_dbexplorer and c.api_token == "tok-secreto"
+    assert c.destino == "api.sankhya.com.br" and c.rotulo == "a · SQL Server · API"
+    assert "tok-secreto" not in repr(c)
+    _recusa(lambda: _registro({"a": {"db_type": "oracle"}}, "api"), "o modo api exige api_token")
+
+
+def test_cadastro_aceita_os_tres_modos_juntos():
+    c = _registro({
+        "d": _entrada(mode="direct"), "e": _entrada(mode="dbe"), "f": _entrada(mode="api", api_token="t"),
+    })
+    assert [x.mode for x in c.values()] == ["direct", "dbe", "api"]
+
+
+def test_modo_api_nao_existe_no_env():
+    try:
+        clients.client_from_env({"SANKHYA_MODE": "api"})
+    except ValueError as exc:
+        assert "só funciona via clients.json" in str(exc)
+    else:
+        raise AssertionError("SANKHYA_MODE=api deveria falhar")
+
+
+class _RespostaHttp:
+    def __init__(self, corpo):
+        self.corpo = corpo
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self.corpo
+
+
+@contextmanager
+def _gateway_falso(*respostas):
+    """Troca o urlopen do `api` por respostas em fila (str/bytes = corpo, int = HTTP de erro)."""
+    import urllib.error
+
+    pedidos, fila = [], list(respostas)
+
+    def urlopen(req, timeout=None):
+        pedidos.append(req)
+        r = fila.pop(0)
+        if isinstance(r, int):
+            raise urllib.error.HTTPError(req.full_url, r, "x", {}, None)
+        return _RespostaHttp(r.encode() if isinstance(r, str) else r)
+
+    original = api.urllib.request.urlopen
+    api.urllib.request.urlopen = urlopen
+    try:
+        yield pedidos
+    finally:
+        api.urllib.request.urlopen = original
+
+
+_OK = '{"status":"1","responseBody":{"fieldsMetadata":[{"name":"N","userType":"I"}],"rows":[[1]]}}'
+
+
+def test_api_loga_no_gateway_com_os_headers_e_consulta_com_bearer():
+    sessao = api.ApiSession("tok", "key", "vidya", "pw")
+    with _gateway_falso('{"bearerToken":"B1"}', _OK) as pedidos:
+        assert sessao.execute("SELECT 1 FROM DUAL;") == (["N"], [[1]], ["I"], False)
+    login, consulta = pedidos
+    assert login.full_url == "https://api.sankhya.com.br/login"
+    assert {k.lower(): v for k, v in login.header_items()} == {
+        "content-type": "application/json", "appkey": "key", "token": "tok",
+        "username": "vidya", "password": "pw",
+    }
+    assert consulta.full_url.startswith("https://api.sankhya.com.br/gateway/v1/mge/service.sbr?")
+    assert "DbExplorerSP.executeQuery" in consulta.full_url
+    assert consulta.get_header("Authorization") == "Bearer B1"
+    assert b'"SELECT 1 FROM DUAL"' in consulta.data
+
+
+def test_api_refaz_o_login_uma_vez_no_401():
+    sessao = api.ApiSession("tok", "key", "vidya", "pw")
+    with _gateway_falso('{"bearerToken":"B1"}', 401, '{"bearerToken":"B2"}', _OK) as pedidos:
+        sessao.execute("SELECT 1")
+    assert pedidos[-1].get_header("Authorization") == "Bearer B2"
+
+
+def test_api_login_recusado_nao_vaza_credencial():
+    sessao = api.ApiSession("tok-secreto", "key", "vidya", "pw-secreto")
+    with _gateway_falso('{"error":"Token invalido"}'):
+        try:
+            sessao.execute("SELECT 1")
+        except dbe.DbeError as exc:
+            assert "Token invalido" in str(exc)
+            assert "tok-secreto" not in str(exc) and "pw-secreto" not in str(exc)
+        else:
+            raise AssertionError("deveria recusar o login")
+
+
+def test_api_logout_chama_o_gateway_com_o_bearer_e_limpa_a_sessao():
+    sessao = api.ApiSession("tok", "key", "vidya", "pw")
+    with _gateway_falso('{"bearerToken":"B1"}', _OK, '{"status":"1"}') as pedidos:
+        sessao.execute("SELECT 1")
+        sessao.logout()
+        sessao.logout()  # sem sessão aberta: não chama o gateway de novo
+    assert len(pedidos) == 3 and "MobileLoginSP.logout" in pedidos[2].full_url
+    assert pedidos[2].get_header("Authorization") == "Bearer B1" and sessao._jsessionid is None
+
+
+def test_api_logout_falho_nao_levanta():
+    sessao = api.ApiSession("tok", "key", "vidya", "pw")
+    sessao._jsessionid = "B1"
+    with _gateway_falso(500):
+        sessao.logout()
+    assert sessao._jsessionid is None
+
+
+def test_api_encerra_as_sessoes_abertas_no_atexit():
+    chamadas = []
+    a, b = api.ApiSession("a", "k", "u", "p"), api.ApiSession("b", "k", "u", "p")
+    a.logout = b.logout = lambda: chamadas.append(1)
+    antes = dict(api._sessions)
+    api._sessions.update(a=a, b=b)
+    try:
+        api._logout_todas()
+    finally:
+        api._sessions.clear()
+        api._sessions.update(antes)
+    assert len(chamadas) == 2
+
+
+def test_api_sem_credencial_da_vidya_nomeia_a_variavel():
+    guardado = {k: os.environ.pop(k, None) for k in api._ENV}
+    try:
+        try:
+            api.get_api_session("tok")
+        except dbe.DbeError as exc:
+            assert all(nome in str(exc) for nome in api._ENV)
+        else:
+            raise AssertionError("deveria exigir as variáveis")
+        os.environ.update(SANKHYA_API_APPKEY="k", SANKHYA_API_USER="u", SANKHYA_API_PASSWORD="p")
+        a = api.get_api_session("tok")
+        assert api.get_api_session("tok") is a and api.get_api_session("outro") is not a
+    finally:
+        api._sessions.clear()
+        for k, v in guardado.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_fetch_rows_api_usa_a_sessao_do_gateway_e_nao_abre_conexao():
+    sessao = _SessaoFalsa(["TABLE_NAME"], [["TGFCAB"]])
+    cliente = dataclasses.replace(active_client(), name="api", mode="api", api_token="tok")
+    visto = []
+    guardado, original = server.get_api_session, server.connect
+    server.get_api_session = lambda token: visto.append(token) or sessao
+
+    def sem_conexao():
+        raise AssertionError("o modo API não pode abrir conexão com o banco")
+
+    server.connect = sem_conexao
+    try:
+        with _cadastro({"api": cliente}):
+            rows, truncated = server.fetch_rows("SELECT 1 FROM T WHERE A = :1", ["x"])
+            assert server.validate_query("SELECT 1 FROM T").startswith("✅")
+    finally:
+        server.get_api_session, server.connect = guardado, original
+    assert visto[0] == "tok" and rows == [{"table_name": "TGFCAB"}] and truncated is False
+    assert sessao.recebido[0] == "SELECT 1 FROM T WHERE A = 'x'"
+
+
 def test_toda_tool_com_banco_aceita_client():
     import inspect
 
