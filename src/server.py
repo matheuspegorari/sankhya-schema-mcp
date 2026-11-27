@@ -96,7 +96,7 @@ def fetch_rows(
     cliente = active_client()
     if cliente.via_dbexplorer:
         sessao = (
-            get_api_session(cliente.api_token)
+            get_api_session(cliente.api_token, bool(cliente.sandbox))
             if cliente.mode == "api"
             else get_session(cliente.dbe_url, cliente.dbe_user, cliente.dbe_password)
         )

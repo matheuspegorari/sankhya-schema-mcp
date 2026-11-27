@@ -148,6 +148,8 @@ class Client:
     # Gateway oficial (usado quando `mode == "api"`): o token do cliente no gateway.
     # AppKey, usuário e senha do gateway são da Vidya, não do cliente: ficam no `.env`.
     api_token: str = field(default="", repr=False)
+    # `None` (padrão) e `False` usam api.sankhya.com.br; `True`, api.sandbox.sankhya.com.br.
+    sandbox: Optional[bool] = None
 
     @property
     def via_dbexplorer(self) -> bool:
@@ -167,7 +169,7 @@ class Client:
         if self.mode == "dbe":
             return self.dbe_url
         if self.mode == "api":
-            return "api.sankhya.com.br"
+            return "api.sandbox.sankhya.com.br" if self.sandbox else "api.sankhya.com.br"
         return f"{self.host}:{self.port}"
 
 
@@ -247,7 +249,7 @@ _REGISTRY_KEYS = {
     "db_host", "db_port", "db_service", "db_service_name", "db_database",
     "db_user", "db_password",
     "dbe_url", "dbe_user", "dbe_password",
-    "api_token",
+    "api_token", "sandbox",
 }
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -270,6 +272,9 @@ def _client_from_entry(name: str, entry: dict) -> Client:
     padrao = entry.get("default", False)
     if not isinstance(padrao, bool):
         raise ClientError(f'{contexto}: "default" deve ser true ou false.')
+    sandbox = entry.get("sandbox")
+    if sandbox is not None and not isinstance(sandbox, bool):
+        raise ClientError(f'{contexto}: "sandbox" deve ser true, false ou null.')
 
     def texto(chave: str) -> str:
         return str(entry.get(chave) or "").strip()
@@ -314,6 +319,7 @@ def _client_from_entry(name: str, entry: dict) -> Client:
             dbe_user=texto("dbe_user"),
             dbe_password=str(entry.get("dbe_password") or ""),
             api_token=texto("api_token"),
+            sandbox=sandbox,
         )
     except ValueError as exc:
         raise ClientError(f"{contexto}: {exc}") from None

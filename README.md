@@ -4,7 +4,7 @@
 
 Servidor MCP (Model Context Protocol) que conecta o Claude Code e/ou o Codex CLI ao banco do Sankhya ERP, permitindo explorar tabelas, campos, índices, relacionamentos e executar queries SQL diretamente durante uma conversa.
 
-Dois modos de acesso: `direct` conecta no banco pelo driver; `dbe` consulta pelo DB Explorer do próprio Sankhya, para quando só a porta HTTP da aplicação é alcançável. O modo é **de cada cliente**: um mesmo servidor atende **vários clientes**, cadastrados em `clients.json`, cada um com o seu `mode` e o seu banco, e mistura os dois à vontade. Sem `clients.json`, `SANKHYA_MODE` (**obrigatório**) define o modo do cliente único montado do `.env`. Veja [Escolhendo o modo e o banco](#escolhendo-o-modo-e-o-banco), [Modo DBE](#modo-dbe-sem-conexão-com-o-banco) e [Vários clientes](#vários-clientes).
+Três modos de acesso: `direct` conecta no banco pelo driver; `dbe` consulta pelo DB Explorer do próprio Sankhya do cliente, para quando só a porta HTTP da aplicação é alcançável; `api` consulta o mesmo DB Explorer pelo gateway oficial da Sankhya (`api.sankhya.com.br`), para quando o cliente bloqueou o login do DBE. O modo é **de cada cliente**: um mesmo servidor atende **vários clientes**, cadastrados em `clients.json`, cada um com o seu `mode` e o seu banco, e mistura os três à vontade. Sem `clients.json`, `SANKHYA_MODE` (**obrigatório**: `direct` ou `dbe`) define o modo do cliente único montado do `.env`; o modo `api` só existe via `clients.json`. Veja [Qual modo usar](#qual-modo-usar), [Escolhendo o modo e o banco](#escolhendo-o-modo-e-o-banco), [Modo DBE](#modo-dbe-sem-conexão-com-o-banco), [Modo API](#modo-api-gateway-oficial-da-sankhya) e [Vários clientes](#vários-clientes).
 
 Suporta os **dois bancos** distribuídos pela Sankhya no ambiente de desenvolvimento:
 
@@ -14,6 +14,16 @@ Suporta os **dois bancos** distribuídos pela Sankhya no ambiente de desenvolvim
 | SQL Server | `pymssql` (wheel com FreeTDS embutido — não exige driver de sistema operacional) | `sankhyaimages/skdev-mssql:1.1.0` | 1433 | database `jiva` |
 
 O banco é escolhido por `SANKHYA_DB_TYPE` (no `.env` ou, por cliente, no `clients.json`) — veja [Configuração do banco](#configuração-do-banco).
+
+### Qual modo usar
+
+| Modo | Como chega aos dados | Use quando | O que você precisa ter | Onde se configura |
+|------|----------------------|------------|------------------------|-------------------|
+| `direct` | Driver do banco (`oracledb` ou `pymssql`), direto na porta do banco | A porta do banco (1521/1433) é alcançável da sua máquina | Host, usuário e senha do banco | `.env` (`SANKHYA_DB_*`) ou `clients.json` (`db_*`) |
+| `dbe` | Login no Sankhya (`MobileLoginSP.login`) e consultas pelo DB Explorer | Só a porta HTTP do Sankhya é alcançável, e o login do DBE funciona | URL, usuário e senha do Sankhya | `.env` (`SANKHYA_DBE_*`) ou `clients.json` (`dbe_*`) |
+| `api` | O mesmo DB Explorer, pelo gateway oficial `api.sankhya.com.br` | O cliente bloqueou o login do DBE | `api_token` do cliente **e** AppKey, usuário e senha do gateway | **Só** `clients.json` (`api_token`), mais `SANKHYA_API_*` no `.env` |
+
+Na dúvida, siga a ordem: `direct` se você alcança o banco; senão `dbe`; se o login do DBE for recusado, `api`. Os modos `dbe` e `api` têm os mesmos limites (só `SELECT`/`WITH`, 5000 linhas, sem `EXPLAIN PLAN`). Nos três, o SQL é o do banco por trás do cliente (`db_type`).
 
 ---
 
@@ -30,7 +40,7 @@ O banco é escolhido por `SANKHYA_DB_TYPE` (no `.env` ou, por cliente, no `clien
 | `run_query` | Executa SELECT e retorna resultado formatado (somente leitura) |
 | `list_clients` | Clientes cadastrados no `clients.json`, sem credenciais |
 | `get_triggers` | Triggers de uma tabela: momento, evento e se estão ativas (no vocabulário de cada banco) |
-| `validate_query` | Valida sintaxe SQL sem executar (EXPLAIN PLAN no Oracle, SHOWPLAN_ALL no SQL Server). No modo DBE não há plano: a query é executada (somente leitura) e o resultado descartado |
+| `validate_query` | Valida sintaxe SQL sem executar (EXPLAIN PLAN no Oracle, SHOWPLAN_ALL no SQL Server). Nos modos DBE e API não há plano: a query é executada (somente leitura) e o resultado descartado |
 | `table_sample` | Amostra de dados reais, **com o rótulo ao lado do código** (`L (Liberada)`) |
 | `list_modules` | Visão geral dos módulos Sankhya por prefixo de tabela |
 | `check_updates` | Diz se há versão mais nova publicada e o que mudou |
@@ -151,7 +161,7 @@ pwsh -File setup.ps1 -Cli both     # claude | codex | both
 bash setup.sh --cli both           # claude | codex | both
 ```
 
-Após o setup, configure o `.env` (cliente único; **`SANKHYA_MODE` é obrigatório**: `direct` ou `dbe`) **ou** o `clients.json` (um ou vários clientes, cada um com o seu `mode`). Reinicie o CLI escolhido. Sem `SANKHYA_MODE` (e sem `clients.json`) o MCP não sobe e diz o que falta.
+Após o setup, configure o `.env` (cliente único; **`SANKHYA_MODE` é obrigatório**: `direct` ou `dbe`) **ou** o `clients.json` (um ou vários clientes, cada um com o seu `mode`: `direct`, `dbe` ou `api`). Para usar o modo `api`, o `clients.json` é o único caminho e as três variáveis `SANKHYA_API_*` entram no `.env`. Reinicie o CLI escolhido. Sem `SANKHYA_MODE` (e sem `clients.json`) o MCP não sobe e diz o que falta.
 
 Veja **[INSTALACAO.md](INSTALACAO.md)** para o guia completo passo a passo, configuração de credenciais e solução de problemas.
 
@@ -167,7 +177,7 @@ cp .env.example .env
 
 ### Escolhendo o modo e o banco
 
-Este trecho vale para o cliente único montado do `.env`. Com `clients.json`, o modo e a conexão são de cada cliente (veja [Vários clientes](#vários-clientes)) e o `.env` não é lido para isso. Três chaves definem o destino:
+Este trecho vale para o cliente único montado do `.env`, que só pode ser `direct` ou `dbe`. Com `clients.json`, o modo e a conexão são de cada cliente (veja [Vários clientes](#vários-clientes)) e o `.env` não é lido para isso, com uma exceção: a credencial do gateway do [modo `api`](#modo-api-gateway-oficial-da-sankhya) (`SANKHYA_API_*`) sempre mora no `.env`. Três chaves definem o destino:
 
 | Chave | Valores | Default | Para que serve |
 |-------|---------|---------|----------------|
@@ -238,6 +248,48 @@ O SQL continua adaptado ao banco: o catálogo (`ALL_TABLES` no Oracle, `INFORMAT
 
 > O usuário do Sankhya enxerga o que o perfil dele permite no DB Explorer. Use um usuário com acesso somente a esse recurso, e trate o `.env` como credencial de aplicação.
 
+### Modo API: gateway oficial da Sankhya
+
+Alguns clientes bloqueiam o `MobileLoginSP.login` no Sankhya deles, e com isso o [modo DBE](#modo-dbe-sem-conexão-com-o-banco) deixa de funcionar. O modo `api` faz a mesma coisa (consulta o DB Explorer, sem conexão com o banco), mas autentica pelo gateway oficial `api.sankhya.com.br`, que roteia para o Sankhya do cliente pelo token dele:
+
+1. `POST https://api.sankhya.com.br/login` com `AppKey`, `Token`, `Username` e `Password` devolve um bearer;
+2. cada consulta vai ao gateway (`gateway/v1/mge/service.sbr`) com `Authorization: Bearer`.
+
+**Há duas camadas de credencial, em dois lugares:**
+
+| Credencial | Onde fica | O que identifica |
+|------------|-----------|------------------|
+| `api_token` | `clients.json`, **em cada cliente** `api` | O cliente: decide qual Sankhya responde |
+| `SANKHYA_API_APPKEY`, `SANKHYA_API_USER`, `SANKHYA_API_PASSWORD` | `.env` (ou `.sankhya-mcp.env`), **uma vez** | Quem integra pelo gateway: a mesma credencial vale para todos os clientes `api` |
+
+**Este repositório não traz nenhuma dessas credenciais.** A AppKey, o usuário e a senha do gateway são emitidos pela Sankhya para o integrador (na Vidya, é a credencial da Vidya: peça ao responsável); consulte a documentação do gateway em [developer.sankhya.com.br](https://developer.sankhya.com.br). O `api_token` é do cliente: peça-o a quem administra o Sankhya dele. Sem esse conjunto, use `dbe` ou `direct`.
+
+`.env`:
+```ini
+SANKHYA_API_APPKEY=appkey_do_integrador
+SANKHYA_API_USER=usuario_do_gateway
+SANKHYA_API_PASSWORD=senha_do_gateway
+```
+
+`clients.json`:
+```json
+{
+  "gama": {"descricao": "Gama SA (gateway oficial)", "mode": "api", "db_type": "oracle",
+           "db_schema": "SANKHYA", "api_token": "token_do_cliente_no_gateway"}
+}
+```
+
+Como se comporta:
+
+- `db_type` diz qual banco está por trás (o SQL é escrito para ele): `oracle` (padrão) ou `sqlserver`.
+- O login é feito na **primeira consulta** do cliente. A credencial do `.env` só é conferida nesse momento, então o servidor sobe mesmo sem ela quando há clientes `direct` ou `dbe` no mesmo arquivo; se faltar, a consulta do cliente `api` falha dizendo quais variáveis definir.
+- `"sandbox": true` no cliente aponta para `api.sandbox.sankhya.com.br` em vez de `api.sankhya.com.br`. Sem a chave (ou `null`/`false`) vale a produção. Só tem efeito no modo `api`, e o `api_token` precisa ser o do sandbox.
+- Há uma sessão por `api_token` e ambiente. Se o gateway responder HTTP 401, o login é refeito uma vez.
+- Ao encerrar o servidor, cada sessão aberta faz logout (`MobileLoginSP.logout`, melhor esforço). Se o processo for morto à força (`SIGKILL`, ou `SIGTERM` sem tratamento), o logout não roda e a sessão expira sozinha após 30 minutos de inatividade.
+- Mesmos limites do DBE: só `SELECT`/`WITH`, 5000 linhas por consulta, sem bind (parâmetros viram literal) e sem `EXPLAIN PLAN`.
+- `SANKHYA_MODE=api` no `.env` **não existe**: o token é por cliente, então o modo só funciona via `clients.json`.
+- O tráfego vai por HTTPS ao gateway. O `api_token` e a senha do gateway ficam em texto puro no `clients.json` e no `.env`: ambos estão no `.gitignore`, e o `clients.json` deve ter `chmod 600`.
+
 ### Vários clientes
 
 Um mesmo MCP pode atender vários clientes, cada um com o seu modo e o seu banco. O cadastro é o arquivo **`clients.json`** na raiz do projeto. Use `clients.example.json` como modelo:
@@ -249,19 +301,22 @@ Um mesmo MCP pode atender vários clientes, cada um com o seu modo e o seu banco
            "dbe_user": "usuario_sankhya", "dbe_password": "senha_sankhya"},
   "beta": {"descricao": "Beta SA", "mode": "direct", "db_type": "sqlserver", "db_schema": "SANKHYA",
            "db_host": "10.0.0.9", "db_database": "jiva",
-           "db_user": "usuario_banco", "db_password": "senha_banco"}
+           "db_user": "usuario_banco", "db_password": "senha_banco"},
+  "gama": {"descricao": "Gama SA", "mode": "api", "db_type": "oracle",
+           "api_token": "token_do_cliente_no_gateway"}
 }
 ```
 
-**O modo é de cada cliente.** A chave `mode` (`direct`, `dbe` ou `api`) é obrigatória em toda entrada e decide qual conjunto de credenciais dela é usado: `db_*` no `direct`, `dbe_*` no `dbe`, `api_token` no `api`. Um mesmo arquivo mistura os três modos. Só o conjunto do modo da entrada é exigido; o outro pode ficar de fora (ou guardado, para quando você trocar o modo daquele cliente). Cliente sem `mode`, ou sem as credenciais do seu modo, derruba a subida, em vez de sumir da lista em silêncio.
+**O modo é de cada cliente.** A chave `mode` (`direct`, `dbe` ou `api`) é obrigatória em toda entrada e decide qual conjunto de credenciais dela é usado: `db_*` no `direct`, `dbe_*` no `dbe`, `api_token` no `api`. Um mesmo arquivo mistura os três modos. Só o conjunto do modo da entrada é exigido; o outro pode ficar de fora (ou guardado, para quando você trocar o modo daquele cliente). É por isso que, no `clients.example.json`, `acme` e `beta` trazem os conjuntos `db_*` e `dbe_*` juntos: o conjunto que não é do `mode` da entrada é ignorado. Cliente sem `mode`, ou sem as credenciais do seu modo, derruba a subida, em vez de sumir da lista em silêncio.
 
 | Chave | Obrigatória | Para que serve |
 |-------|-------------|----------------|
-| `mode` | sempre | `direct` (conecta no banco pelo driver), `dbe` (consulta pelo DB Explorer do Sankhya do cliente) ou `api` (o mesmo DB Explorer, pelo gateway oficial `api.sankhya.com.br`; use quando o cliente bloqueou o login do DBE) |
+| `mode` | sempre | `direct` (conecta no banco pelo driver), `dbe` (consulta pelo DB Explorer do Sankhya do cliente) ou `api` (o mesmo DB Explorer, pelo gateway oficial `api.sankhya.com.br`; use quando o cliente bloqueou o login do DBE). Veja [Qual modo usar](#qual-modo-usar) |
 | `db_host`, `db_user`, `db_password` | se `mode` é `direct` | Banco do cliente. Não há `localhost` implícito aqui: esquecer o host apontaria para a máquina local |
 | `db_port`, `db_service`, `db_service_name`, `db_database` | não | Como no `.env` (porta segue o banco: 1521 ou 1433) |
 | `dbe_url`, `dbe_user`, `dbe_password` | se `mode` é `dbe` | Sankhya do cliente e credencial da aplicação |
-| `api_token` | se `mode` é `api` | Token do cliente no gateway. A credencial da Vidya no gateway (AppKey, usuário e senha) é a mesma para todos e vai no `.env`: `SANKHYA_API_APPKEY`, `SANKHYA_API_USER`, `SANKHYA_API_PASSWORD` (exigidas na primeira consulta de um cliente `api`). Ao encerrar o servidor, a sessão no gateway é encerrada (`MobileLoginSP.logout`, melhor esforço). Mesmos limites do DBE: só SELECT/WITH, 5000 linhas, sem EXPLAIN PLAN. O modo `api` só existe via `clients.json` |
+| `sandbox` | não (só `api`) | `true` usa o gateway de sandbox (`api.sandbox.sankhya.com.br`); `null`/ausente/`false`, a produção |
+| `api_token` | se `mode` é `api` | Token do cliente no gateway. A credencial do gateway (AppKey, usuário e senha) **não** vai aqui: é uma só para todos os clientes `api` e mora no `.env` (`SANKHYA_API_APPKEY`, `SANKHYA_API_USER`, `SANKHYA_API_PASSWORD`). Detalhes em [Modo API](#modo-api-gateway-oficial-da-sankhya) |
 | `db_type` | não (`oracle`) | O banco do cliente: `oracle` ou `sqlserver`. Pode diferir entre clientes |
 | `db_schema` | não | Schema das tabelas, como `SANKHYA_DB_SCHEMA` |
 | `descricao` | não | Texto mostrado em `list_clients` |
@@ -276,7 +331,7 @@ As chaves seguem o nome da variável do `.env` sem o `SANKHYA_` (`db_type` ↔ `
 
 O MCP não pergunta nada sozinho: quem decide é o Claude, a partir do que você disse. As instruções do servidor mandam perguntar quando o cliente não está claro, em vez de adivinhar. Para não ser perguntado toda vez, marque um `default` ou diga o cliente padrão do projeto no `CLAUDE.md`.
 
-**Onde fica o arquivo.** Ordem de busca: `SANKHYA_CLIENTS_FILE` (que precisa existir), depois `clients.json` na raiz do MCP. Para um cadastro por projeto, ponha `SANKHYA_CLIENTS_FILE=/caminho/clients.json` no `.sankhya-mcp.env` do projeto. Sem arquivo, as variáveis `SANKHYA_*` do `.env` valem como um único cliente chamado `default`. Com o arquivo, o `.env` não entra para modo nem conexão (`SANKHYA_MODE`, `SANKHYA_DB_HOST`, `SANKHYA_DBE_URL` etc.): tudo vem de cada cliente.
+**Onde fica o arquivo.** Ordem de busca: `SANKHYA_CLIENTS_FILE` (que precisa existir), depois `clients.json` na raiz do MCP. Para um cadastro por projeto, ponha `SANKHYA_CLIENTS_FILE=/caminho/clients.json` no `.sankhya-mcp.env` do projeto. Sem arquivo, as variáveis `SANKHYA_*` do `.env` valem como um único cliente chamado `default`. Com o arquivo, o `.env` não entra para modo nem conexão (`SANKHYA_MODE`, `SANKHYA_DB_HOST`, `SANKHYA_DBE_URL` etc.): tudo vem de cada cliente. A única exceção é a credencial do gateway do modo `api` (`SANKHYA_API_APPKEY`, `SANKHYA_API_USER`, `SANKHYA_API_PASSWORD`), que continua vindo do ambiente (`.env` ou `.sankhya-mcp.env`).
 
 **Credenciais.** O arquivo guarda as senhas em texto puro e está no `.gitignore`: use `chmod 600 clients.json` (o servidor avisa se outros usuários da máquina podem lê-lo). O cadastro é feito só editando o arquivo. Não há tool para cadastrar cliente de propósito: a senha passaria pela conversa e ficaria no histórico.
 
@@ -353,7 +408,7 @@ Busque a entidade "Parceiro"
 
 - Apenas `SELECT` é permitido — comandos DML/DDL (INSERT, UPDATE, DELETE, DROP etc.) são bloqueados por uma allowlist textual na aplicação
 - A validação é textual e não cobre tudo: uma função que já existe no schema com `PRAGMA AUTONOMOUS_TRANSACTION`, chamada em `SELECT pacote.funcao(x) FROM DUAL`, grava mesmo assim
-- A conexão é local — nenhum dado sai da máquina. No modo DBE a consulta sai por HTTP até o Sankhya configurado em `SANKHYA_DBE_URL`: prefira `https` fora da rede interna, porque usuário e senha viajam no login
+- A conexão é local — nenhum dado sai da máquina. No modo DBE a consulta sai por HTTP até o Sankhya configurado em `SANKHYA_DBE_URL`: prefira `https` fora da rede interna, porque usuário e senha viajam no login. No modo API ela sai por HTTPS até `api.sankhya.com.br`, com o `api_token` do cliente e a credencial do gateway
 - Credenciais ficam no `.env` local, fora do controle de versão
 - `SELECT ... INTO` é rejeitado pela allowlist. No Oracle não é sintaxe válida em SQL puro; no SQL Server **criaria tabela** — escrita disfarçada de leitura, e lá não existe `READ ONLY` de sessão para recusá-la
 - Como o usuário recomendado é somente-leitura e normalmente **não** é o dono das tabelas, defina `SANKHYA_DB_SCHEMA` com o schema onde elas moram (ver abaixo) — sem isso, parte das tools responde "objeto não existe"
@@ -461,6 +516,7 @@ sankhya-schema-mcp/
 │   ├── server.py          # Servidor MCP: tools, formatação e validação
 │   ├── dialects.py        # Queries, conexão e transação por banco (Oracle/SQL Server)
 │   ├── dbe.py             # Modo DBE: login no Sankhya e consultas pelo DB Explorer
+│   ├── api.py             # Modo API: o mesmo DB Explorer, pelo gateway oficial (api.sankhya.com.br)
 │   ├── clients.py         # Clientes: cadastro (clients.json), seleção e cliente ativo da chamada
 │   ├── updates.py         # Consulta de versão publicada e aviso de atualização
 │   └── version.py         # Versão do projeto (fonte única)
@@ -469,9 +525,10 @@ sankhya-schema-mcp/
 │   └── release.ps1        # Validador de publicação (Windows)
 ├── instantclient/         # Oracle Instant Client (baixado pelo setup)
 ├── .venv/                 # Ambiente virtual Python (criado pelo setup)
-├── .env                   # Credenciais do banco (não versionado)
+├── .env                   # Credenciais do banco, do DBE e do gateway API (não versionado)
 ├── .env.example           # Modelo de credenciais
-├── clients.example.json   # Modelo do cadastro de clientes (modo DBE)
+├── clients.json           # Cadastro de clientes, com o modo de cada um (não versionado)
+├── clients.example.json   # Modelo do cadastro de clientes (direct, dbe e api)
 ├── start.ps1              # Script de inicialização (Windows)
 ├── start.sh               # Script de inicialização (Linux)
 ├── setup.ps1              # Instalador automático (Windows)

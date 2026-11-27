@@ -2227,6 +2227,32 @@ def test_api_encerra_as_sessoes_abertas_no_atexit():
     assert len(chamadas) == 2
 
 
+def test_api_sandbox_usa_o_gateway_de_sandbox_e_sessao_propria():
+    sessao = api.ApiSession("tok", "key", "vidya", "pw", sandbox=True)
+    with _gateway_falso('{"bearerToken":"B1"}', _OK) as pedidos:
+        sessao.execute("SELECT 1 FROM DUAL;")
+    login, consulta = pedidos
+    assert login.full_url == "https://api.sandbox.sankhya.com.br/login"
+    assert consulta.full_url.startswith("https://api.sandbox.sankhya.com.br/gateway/v1/mge/service.sbr?")
+    guardado = {k: os.environ.get(k) for k in api._ENV}
+    os.environ.update(SANKHYA_API_APPKEY="k", SANKHYA_API_USER="u", SANKHYA_API_PASSWORD="p")
+    try:
+        assert api.get_api_session("tok", True) is not api.get_api_session("tok")
+    finally:
+        api._sessions.clear()
+        for k, v in guardado.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_sandbox_no_cliente_padrao_nulo_e_so_booleano():
+    assert _registro({"a": {"api_token": "t"}}, "api")["a"].sandbox is None
+    c = _registro({"a": {"api_token": "t", "sandbox": True}}, "api")["a"]
+    assert c.sandbox is True and c.destino == "api.sandbox.sankhya.com.br"
+    _recusa(lambda: _registro({"a": {"api_token": "t", "sandbox": "sim"}}, "api"), '"sandbox" deve ser')
+
+
 def test_api_sem_credencial_da_vidya_nomeia_a_variavel():
     guardado = {k: os.environ.pop(k, None) for k in api._ENV}
     try:
@@ -2252,7 +2278,7 @@ def test_fetch_rows_api_usa_a_sessao_do_gateway_e_nao_abre_conexao():
     cliente = dataclasses.replace(active_client(), name="api", mode="api", api_token="tok")
     visto = []
     guardado, original = server.get_api_session, server.connect
-    server.get_api_session = lambda token: visto.append(token) or sessao
+    server.get_api_session = lambda token, sandbox=False: visto.append(token) or sessao
 
     def sem_conexao():
         raise AssertionError("o modo API não pode abrir conexão com o banco")

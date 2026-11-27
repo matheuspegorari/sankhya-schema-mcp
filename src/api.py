@@ -27,6 +27,7 @@ from decimal import Decimal
 from dbe import DbeError, DbeSession, TIMEOUT_SEGUNDOS
 
 GATEWAY = "https://api.sankhya.com.br"
+GATEWAY_SANDBOX = "https://api.sandbox.sankhya.com.br"
 
 # Variáveis do ambiente com a credencial da Vidya no gateway, na ordem de AppKey,
 # Username e Password.
@@ -42,8 +43,9 @@ class ApiSession(DbeSession):
     "sessão expirada" do DBE, e a consulta refaz o login uma vez.
     """
 
-    def __init__(self, token: str, appkey: str, usuario: str, senha: str):
-        super().__init__(GATEWAY, usuario, senha)
+    def __init__(self, token: str, appkey: str, usuario: str, senha: str, sandbox: bool = False):
+        self._gateway = GATEWAY_SANDBOX if sandbox else GATEWAY
+        super().__init__(self._gateway, usuario, senha)
         self._token = token
         self._appkey = appkey
 
@@ -66,7 +68,7 @@ class ApiSession(DbeSession):
 
     def _post(self, servico: str, corpo: dict, jsessionid=None) -> dict:
         requisicao = urllib.request.Request(
-            f"{GATEWAY}/gateway/v1/mge/service.sbr?serviceName={servico}&outputType=json",
+            f"{self._gateway}/gateway/v1/mge/service.sbr?serviceName={servico}&outputType=json",
             data=json.dumps({"serviceName": servico, "requestBody": corpo}).encode("utf-8"),
             headers={
                 "Content-Type": "application/json; charset=UTF-8",
@@ -79,7 +81,7 @@ class ApiSession(DbeSession):
     def login(self) -> None:
         with self._lock:
             requisicao = urllib.request.Request(
-                f"{GATEWAY}/login",
+                f"{self._gateway}/login",
                 data=b"",
                 headers={
                     "Content-Type": "application/json",
@@ -113,8 +115,8 @@ class ApiSession(DbeSession):
                 pass
 
 
-# Uma sessão por token: cada cliente tem o seu bearer.
-_sessions: dict[str, ApiSession] = {}
+# Uma sessão por token e ambiente: cada cliente tem o seu bearer.
+_sessions: dict[tuple, ApiSession] = {}
 _sessions_lock = threading.Lock()
 _logout_registrado = False
 
@@ -124,7 +126,7 @@ def _logout_todas() -> None:
         sessao.logout()
 
 
-def get_api_session(token: str) -> ApiSession:
+def get_api_session(token: str, sandbox: bool = False) -> ApiSession:
     """
     A sessão do processo para esse token, criada na primeira consulta (o login é lazy).
 
@@ -139,10 +141,11 @@ def get_api_session(token: str) -> ApiSession:
         raise DbeError("Cliente api sem api_token.")
     global _logout_registrado
     with _sessions_lock:
-        if token not in _sessions:
-            _sessions[token] = ApiSession(token, appkey, usuario, senha)
+        chave = (token, bool(sandbox))
+        if chave not in _sessions:
+            _sessions[chave] = ApiSession(token, appkey, usuario, senha, bool(sandbox))
             if not _logout_registrado:
                 # shortcut: não roda em SIGKILL nem SIGTERM sem handler; a sessão expira sozinha.
                 atexit.register(_logout_todas)
                 _logout_registrado = True
-        return _sessions[token]
+        return _sessions[chave]

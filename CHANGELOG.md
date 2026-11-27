@@ -10,6 +10,16 @@ A tool `check_updates` do próprio servidor compara a versão instalada com a
 de cada release no GitHub** são geradas a partir da seção correspondente deste
 arquivo. Uma seção vazia reprova a publicação.
 
+## [2.3.0] - 2026-11-27
+
+### Adicionado
+
+- **`sandbox` no `clients.json`** (só modo `api`): `"sandbox": true` aponta o
+  cliente para `api.sandbox.sankhya.com.br` em vez de `api.sankhya.com.br`.
+  Ausente, `null` ou `false` mantém a produção; outro valor derruba a subida.
+  O `api_token` precisa ser o do sandbox. A sessão passa a ser uma por token e
+  ambiente.
+
 ## [2.2.0] - 2026-11-04
 
 ### Adicionado
