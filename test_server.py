@@ -2235,10 +2235,11 @@ def test_api_sandbox_usa_o_gateway_de_sandbox_e_sessao_propria():
     assert login.full_url == "https://api.sandbox.sankhya.com.br/login"
     assert consulta.full_url.startswith("https://api.sandbox.sankhya.com.br/gateway/v1/mge/service.sbr?")
     guardado = {k: os.environ.get(k) for k in api._ENV}
-    os.environ.update(SANKHYA_API_APPKEY="k", SANKHYA_API_USER="u", SANKHYA_API_PASSWORD="p")
+    os.environ.update(SANKHYA_API_APPKEY="k", SANKHYA_API_APPKEY_SANDBOX="ks", SANKHYA_API_USER="u", SANKHYA_API_PASSWORD="p")
     try:
         assert api.get_api_session("tok", True) is not api.get_api_session("tok")
     finally:
+        os.environ.pop("SANKHYA_API_APPKEY_SANDBOX", None)
         api._sessions.clear()
         for k, v in guardado.items():
             os.environ.pop(k, None)
@@ -2265,7 +2266,17 @@ def test_api_sem_credencial_da_vidya_nomeia_a_variavel():
         os.environ.update(SANKHYA_API_APPKEY="k", SANKHYA_API_USER="u", SANKHYA_API_PASSWORD="p")
         a = api.get_api_session("tok")
         assert api.get_api_session("tok") is a and api.get_api_session("outro") is not a
+        # sandbox: exige a AppKey própria e a manda no login, sem cair na de produção
+        try:
+            api.get_api_session("tok", True)
+        except dbe.DbeError as exc:
+            assert "SANKHYA_API_APPKEY_SANDBOX" in str(exc)
+        else:
+            raise AssertionError("sandbox deveria exigir SANKHYA_API_APPKEY_SANDBOX")
+        os.environ["SANKHYA_API_APPKEY_SANDBOX"] = "k-sandbox"
+        assert api.get_api_session("tok", True)._appkey == "k-sandbox" and a._appkey == "k"
     finally:
+        os.environ.pop("SANKHYA_API_APPKEY_SANDBOX", None)
         api._sessions.clear()
         for k, v in guardado.items():
             os.environ.pop(k, None)

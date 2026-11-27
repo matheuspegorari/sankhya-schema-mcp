@@ -267,6 +267,7 @@ Alguns clientes bloqueiam o `MobileLoginSP.login` no Sankhya deles, e com isso o
 `.env`:
 ```ini
 SANKHYA_API_APPKEY=appkey_do_integrador
+SANKHYA_API_APPKEY_SANDBOX=appkey_do_sandbox   # só se houver cliente com "sandbox": true
 SANKHYA_API_USER=usuario_do_gateway
 SANKHYA_API_PASSWORD=senha_do_gateway
 ```
@@ -283,7 +284,7 @@ Como se comporta:
 
 - `db_type` diz qual banco está por trás (o SQL é escrito para ele): `oracle` (padrão) ou `sqlserver`.
 - O login é feito na **primeira consulta** do cliente. A credencial do `.env` só é conferida nesse momento, então o servidor sobe mesmo sem ela quando há clientes `direct` ou `dbe` no mesmo arquivo; se faltar, a consulta do cliente `api` falha dizendo quais variáveis definir.
-- `"sandbox": true` no cliente aponta para `api.sandbox.sankhya.com.br` em vez de `api.sankhya.com.br`. Sem a chave (ou `null`/`false`) vale a produção. Só tem efeito no modo `api`, e o `api_token` precisa ser o do sandbox.
+- `"sandbox": true` no cliente aponta para `api.sandbox.sankhya.com.br` em vez de `api.sankhya.com.br`. Sem a chave (ou `null`/`false`) vale a produção. Só tem efeito no modo `api`. O `api_token` precisa ser o do sandbox, e o login usa a AppKey do sandbox (`SANKHYA_API_APPKEY_SANDBOX` no `.env`, sem fallback para a de produção); usuário e senha são os mesmos.
 - Há uma sessão por `api_token` e ambiente. Se o gateway responder HTTP 401, o login é refeito uma vez.
 - Ao encerrar o servidor, cada sessão aberta faz logout (`MobileLoginSP.logout`, melhor esforço). Se o processo for morto à força (`SIGKILL`, ou `SIGTERM` sem tratamento), o logout não roda e a sessão expira sozinha após 30 minutos de inatividade.
 - Mesmos limites do DBE: só `SELECT`/`WITH`, 5000 linhas por consulta, sem bind (parâmetros viram literal) e sem `EXPLAIN PLAN`.

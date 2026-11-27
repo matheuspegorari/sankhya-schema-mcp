@@ -32,6 +32,9 @@ GATEWAY_SANDBOX = "https://api.sandbox.sankhya.com.br"
 # Variáveis do ambiente com a credencial da Vidya no gateway, na ordem de AppKey,
 # Username e Password.
 _ENV = ("SANKHYA_API_APPKEY", "SANKHYA_API_USER", "SANKHYA_API_PASSWORD")
+# O sandbox tem AppKey própria: cliente com `sandbox: true` usa esta no lugar da
+# primeira. Usuário e senha são os mesmos nos dois ambientes.
+_ENV_SANDBOX = ("SANKHYA_API_APPKEY_SANDBOX",) + _ENV[1:]
 
 
 class ApiSession(DbeSession):
@@ -133,8 +136,9 @@ def get_api_session(token: str, sandbox: bool = False) -> ApiSession:
     A credencial da Vidya é conferida aqui, e não no boot: um servidor que mistura
     clientes `direct`, `dbe` e `api` precisa subir mesmo sem ela.
     """
-    appkey, usuario, senha = (os.environ.get(nome, "").strip() for nome in _ENV)
-    faltam = [nome for nome, valor in zip(_ENV, (appkey, usuario, senha)) if not valor]
+    nomes = _ENV_SANDBOX if sandbox else _ENV
+    appkey, usuario, senha = (os.environ.get(nome, "").strip() for nome in nomes)
+    faltam = [nome for nome, valor in zip(nomes, (appkey, usuario, senha)) if not valor]
     if faltam:
         raise DbeError("Modo API sem configuração: defina " + ", ".join(faltam) + ".")
     if not token:

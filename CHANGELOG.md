@@ -10,6 +10,16 @@ A tool `check_updates` do próprio servidor compara a versão instalada com a
 de cada release no GitHub** são geradas a partir da seção correspondente deste
 arquivo. Uma seção vazia reprova a publicação.
 
+## [2.3.1] - 2026-11-27
+
+### Corrigido
+
+- **Cliente `sandbox: true` recebia HTTP 403 no login**: o sandbox do gateway tem
+  AppKey própria, e o MCP mandava a de produção (`SANKHYA_API_APPKEY`). Cliente
+  com `sandbox: true` agora usa `SANKHYA_API_APPKEY_SANDBOX`, exigida na primeira
+  consulta (sem fallback para a de produção). Usuário e senha continuam
+  `SANKHYA_API_USER` e `SANKHYA_API_PASSWORD`.
+
 ## [2.3.0] - 2026-11-27
 
 ### Adicionado
